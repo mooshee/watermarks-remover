@@ -53,10 +53,10 @@ remains unchanged; this release does not silently upgrade the vendor package.
 The shared installed skill-description wording is preserved.
 
 Validation on the configured Python 3.12 runtime: 111 focused cases pass; the
-full suite has 1,223 passes, two optional skips and four pre-existing media
+full suite has 1,224 passes, two optional skips and four pre-existing media
 failures. The same four failures reproduce on unchanged vendor base because the
 host ffmpeg cannot load `libx265.216.dylib`. No media pipeline or host library is
-changed by this release. All 100 Python files pass Ruff lint and format checks.
+changed by this release. All 102 Python files pass Ruff lint and format checks.
 
 The first fork CI run also found 24 existing advisories in optional Pillow
 12.3.0. The scorer, MarkLLM and CtrlRegen pins now consistently use Pillow 13.0.0;
@@ -65,6 +65,12 @@ vulnerabilities. The optional Docker bases use Python 3.11 or 3.14, compatible
 with the [Pillow 13 release](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html).
 This does not enable an optional model backend or replace the installed core
 service's Python 3.12 runtime.
+
+The actual Pillow 13 install passed 106 affected image/container/scorer and
+research-adapter tests, including `fromarray/open/convert/load` plus a metadata
+strip with exact restored RGB pixels. That acceptance runs in a named child
+fixture so importing real Pillow cannot pollute the research backends' fake-PIL
+test fixtures. No model backend was loaded or downloaded.
 
 Actual pre-deployment HTTP checks with the native client returned
 `inspected_no_change` for the previously blocked dashboard JavaScript and the
