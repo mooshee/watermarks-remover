@@ -43,12 +43,17 @@ separate bounded inspector before any filename/text routing. `/inspect`, `/clean
 and their batch forms report `kind: executable`.
 `cleaning_modes.mach_o_executable_inspection` advertises this support. Existing
 native clients can use `--inspect` without pretending a binary is text. Executable
-`/clean` is always deterministic and returns the exact input bytes; it never
+`/clean` is always deterministic and returns the exact input bytes only when no
+finding requires review. `requires_review` omits `cleaned` and blocks client
+output and backup writes. The service never
 formats, rewrites, executes, disassembles, re-signs or edits the program.
 
 The inspector checks executable headers, known CPU/header width, fat slice tables,
 alignment and non-overlap, load-command extents and singleton families, segments,
-sections, symbol/link-edit ranges and bounded functional load strings. A dylib
+sections, explicit supported section types and named attribute bits from Apple's
+`loader.h`, symbol/link-edit ranges and bounded functional load strings. Unknown
+section types or attribute bits require review even with a conventional name
+such as `__text`; DTrace DOF metadata remains unsupported. A dylib
 path is functional metadata, not prose: it is validated in its load-command
 context and preserved, even when its text resembles an AI label. Ordinary code,
 constants and string data are not decoded or passed to text detectors. Unknown
@@ -86,6 +91,10 @@ The Rust client in Hallman Platform exposes `--deterministic-only` and
 before writes. The existing prose and media branches keep their established
 behavior; meaning-changing prose, pixel and audio changes retain their own task
 scope. These checks cannot prove human authorship or universal watermark absence.
+For either executable format, the tested installed client refuses review results
+before displaying their report and says `service response did not include cleaned
+bytes`; use `/inspect` to retain those findings. Output and backup writes remain
+blocked. Successful no-change output is unaffected.
 
 The service retains the existing Python runtime because the vendor's format
 parsers and optional media/ML tools use it. This local adaptation is not a Rust
@@ -106,9 +115,7 @@ forms, including requests from existing native clients. Valid supported bytes
 return `kind: executable`, deterministic mode, `inspected_no_change`, identical
 SHA-256 values, `changed: false` and `actions: []`. An ELF `requires_review`
 response omits `cleaned`; the native client must not write output or a backup.
-The current installed client refuses that response before displaying its report
-and says `service response did not include cleaned bytes`; use `/inspect` to
-retain the findings. This affects review results, not successful no-change output.
+The executable review-response/client limitation described above also applies.
 
 Inspection validates header versions, class, byte order, AMD64 identity, ABI,
 sizes and bounded program/section tables; load ordering, ranges, address/file

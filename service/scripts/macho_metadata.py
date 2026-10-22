@@ -35,6 +35,44 @@ LINKEDIT = {0x1D, 0x1E, 0x26, 0x29, 0x2E, 0x80000033, 0x80000034}
 DYLIB = {0xC, 0xD, 0x80000018, 0x8000001F, 0x20, 0x80000023}
 STRINGS = {0xE, 0xF, 0x8000001C, 0x27}
 ZERO_FILL = {1, 0xC, 0x12}
+# Apple's mach-o/loader.h: explicit supported layouts, not the entire low byte.
+# S_DTRACE_DOF (0x0f) carries metadata that needs a dedicated parser.
+SECTION_TYPES = {
+    0x00,  # S_REGULAR
+    0x01,  # S_ZEROFILL
+    0x02,  # S_CSTRING_LITERALS
+    0x03,  # S_4BYTE_LITERALS
+    0x04,  # S_8BYTE_LITERALS
+    0x05,  # S_LITERAL_POINTERS
+    0x06,  # S_NON_LAZY_SYMBOL_POINTERS
+    0x07,  # S_LAZY_SYMBOL_POINTERS
+    0x08,  # S_SYMBOL_STUBS
+    0x09,  # S_MOD_INIT_FUNC_POINTERS
+    0x0A,  # S_MOD_TERM_FUNC_POINTERS
+    0x0B,  # S_COALESCED
+    0x0C,  # S_GB_ZEROFILL
+    0x0D,  # S_INTERPOSING
+    0x0E,  # S_16BYTE_LITERALS
+    0x10,  # S_LAZY_DYLIB_SYMBOL_POINTERS
+    0x11,  # S_THREAD_LOCAL_REGULAR
+    0x12,  # S_THREAD_LOCAL_ZEROFILL
+    0x13,  # S_THREAD_LOCAL_VARIABLES
+    0x14,  # S_THREAD_LOCAL_VARIABLE_POINTERS
+    0x15,  # S_THREAD_LOCAL_INIT_FUNCTION_POINTERS
+    0x16,  # S_INIT_FUNC_OFFSETS
+}
+SECTION_ATTRIBUTES = (
+    0x80000000  # S_ATTR_PURE_INSTRUCTIONS
+    | 0x40000000  # S_ATTR_NO_TOC
+    | 0x20000000  # S_ATTR_STRIP_STATIC_SYMS
+    | 0x10000000  # S_ATTR_NO_DEAD_STRIP
+    | 0x08000000  # S_ATTR_LIVE_SUPPORT
+    | 0x04000000  # S_ATTR_SELF_MODIFYING_CODE
+    | 0x02000000  # S_ATTR_DEBUG
+    | 0x00000400  # S_ATTR_SOME_INSTRUCTIONS
+    | 0x00000200  # S_ATTR_EXT_RELOC
+    | 0x00000100  # S_ATTR_LOC_RELOC
+)
 FUNCTIONAL_SECTIONS = {
     "__text",
     "__stubs",
@@ -363,6 +401,11 @@ def _thin(image: memoryview) -> dict[str, Any]:
                     *_,
                 ) = values
                 section_name, segment_name = _name(section_name), _name(segment_name)
+                section_type = section_flags & 0xFF
+                if section_type not in SECTION_TYPES:
+                    findings.append("unsupported_section_type")
+                if section_flags & ~(SECTION_ATTRIBUTES | 0xFF):
+                    findings.append("unsupported_section_attributes")
                 _require(
                     segment_name == name
                     and address <= start <= address + vm_size
@@ -375,13 +418,38 @@ def _thin(image: memoryview) -> dict[str, Any]:
                 )
                 if nreloc:
                     _range(reloc, nreloc * 8, len(image), "relocations outside slice")
-                if section_flags & 0xFF not in ZERO_FILL and length:
+                if section_type not in ZERO_FILL and length:
                     _require(
                         file_offset <= offset and length <= file_offset + file_size - offset,
                         "section outside segment file range",
                     )
                     _require(offset % (1 << align) == 0, "section file alignment differs")
                     section_ranges.append((offset, offset + length))
+                pointer = 8 if wide else 4
+                element_size = {
+                    0x03: 4,
+                    0x04: 8,
+                    0x05: pointer,
+                    0x06: pointer,
+                    0x07: pointer,
+                    0x09: pointer,
+                    0x0A: pointer,
+                    0x0D: 2 * pointer,
+                    0x0E: 16,
+                    0x10: pointer,
+                    0x13: 3 * pointer,
+                    0x14: pointer,
+                    0x15: pointer,
+                    0x16: 4,
+                }.get(section_type, 1)
+                if length % element_size:
+                    findings.append("unsupported_section_layout")
+                if section_type == 0x02 and length and image[offset + length - 1] != 0:
+                    findings.append("unsupported_section_layout")
+                if section_type == 0x08 and length and (values[10] == 0 or length % values[10]):
+                    findings.append("unsupported_section_layout")
+                if section_flags & 0x02000000 and section_type != 0x00:
+                    findings.append("unsupported_section_layout")
                 if any(
                     mark in section_name.lower() or mark in name.lower()
                     for mark in ("c2pa", "synthid", "ai-generated")
@@ -619,11 +687,10 @@ def clean_macho(data: bytes, options: dict[str, Any]) -> dict[str, Any]:
     unresolved = bool(inspected["findings"])
     status = "requires_review" if unresolved else "inspected_no_change"
     digest = hashlib.sha256(data).hexdigest()
-    return {
+    result = {
         "ok": True,
         "kind": "executable",
         "status": status,
-        "cleaned": base64.b64encode(data).decode("ascii"),
         "report": {
             "mode": "deterministic_only",
             "status": status,
@@ -638,3 +705,6 @@ def clean_macho(data: bytes, options: dict[str, Any]) -> dict[str, Any]:
             "limitations": inspected["limitations"],
         },
     }
+    if not unresolved:
+        result["cleaned"] = base64.b64encode(data).decode("ascii")
+    return result

@@ -7,8 +7,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
+import json
 import os
 import struct
+import subprocess
+import threading
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import macho_metadata as macho
@@ -164,6 +169,19 @@ def replace(data, offset, fmt, *values, endian="<"):
     changed = bytearray(data)
     struct.pack_into(endian + fmt, changed, offset, *values)
     return bytes(changed)
+
+
+def section_flags(data, flags, *, length=None, stub_size=None):
+    endian, wide = macho.THIN[data[:4]]
+    base = (32 + 72) if wide else (28 + 56)
+    data = replace(data, base + (64 if wide else 56), "I", flags, endian=endian)
+    if length is not None:
+        data = replace(
+            data, base + (40 if wide else 36), "Q" if wide else "I", length, endian=endian
+        )
+    if stub_size is not None:
+        data = replace(data, base + (72 if wide else 64), "I", stub_size, endian=endian)
+    return data
 
 
 @pytest.mark.parametrize("wide", [False, True])
@@ -330,7 +348,7 @@ def test_unknown_command_requires_review_without_claiming_ai(code):
     assert result["status"] == "requires_review"
     assert result["report"]["release_ready"] is False
     assert result["report"]["before"]["has_ai_metadata"] is False
-    assert base64.b64decode(result["cleaned"]) == data
+    assert "cleaned" not in result
     assert server._inspect_payload(data, "program", False)["suspicious"]["verdict"] is True
 
 
@@ -339,6 +357,186 @@ def test_explicit_or_unsupported_metadata_section_requires_review(name):
     result = macho.clean_macho(thin(section_name=name), {})
     assert result["status"] == "requires_review"
     assert not result["report"]["release_ready"]
+    assert "cleaned" not in result
+
+
+@pytest.mark.parametrize("wide", [False, True])
+@pytest.mark.parametrize("endian", ["<", ">"])
+@pytest.mark.parametrize(
+    "flags,finding",
+    [
+        (0x17, "unsupported_section_type"),
+        (0xFF, "unsupported_section_type"),
+        (0x0F, "unsupported_section_type"),
+        (0x01000000, "unsupported_section_attributes"),
+        (0x00000800, "unsupported_section_attributes"),
+        (0x00800000, "unsupported_section_attributes"),
+        (0xDEADBEEF, "unsupported_section_type"),
+    ],
+)
+def test_unknown_section_type_or_attribute_cannot_hide_behind_text_name(
+    wide, endian, flags, finding
+):
+    data = section_flags(thin(wide=wide, endian=endian), flags)
+    result = server._clean_payload(data, "program", {})
+    assert result["status"] == "requires_review"
+    assert finding in result["report"]["before"]["findings"]
+    assert result["report"]["release_ready"] is False
+    assert result["report"]["before"]["has_ai_metadata"] is False
+    assert "cleaned" not in result
+    assert (
+        result["report"]["input_sha256"]
+        == result["report"]["output_sha256"]
+        == hashlib.sha256(data).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        0x80000400,
+        0x40000000,
+        0x20000000,
+        0x10000000,
+        0x08000000,
+        0x04000000,
+        0x02000000,
+        0x00000400,
+        0x00000200,
+        0x00000100,
+    ],
+)
+def test_named_section_attributes_preserve_supported_regular_section(flags):
+    data = section_flags(thin(), flags)
+    result = macho.clean_macho(data, {})
+    assert result["status"] == "inspected_no_change"
+    assert base64.b64decode(result["cleaned"]) == data
+
+
+@pytest.mark.parametrize(
+    "kind,length,stub_size",
+    [
+        (0x03, 64, None),
+        (0x04, 64, None),
+        (0x08, 64, 4),
+        (0x0D, 64, None),
+        (0x0E, 64, None),
+        (0x11, 64, None),
+        (0x13, 48, None),
+        (0x14, 64, None),
+        (0x15, 64, None),
+        (0x16, 64, None),
+    ],
+)
+def test_supported_declared_layouts_preserve_bytes(kind, length, stub_size):
+    data = section_flags(thin(), kind, length=length, stub_size=stub_size)
+    assert base64.b64decode(macho.clean_macho(data, {})["cleaned"]) == data
+
+
+@pytest.mark.parametrize(
+    "kind,length,stub_size",
+    [
+        (0x02, 64, None),
+        (0x03, 63, None),
+        (0x04, 63, None),
+        (0x08, 64, 0),
+        (0x08, 64, 3),
+        (0x0E, 63, None),
+        (0x13, 64, None),
+        (0x16, 63, None),
+        (0x02000016, 64, None),
+    ],
+)
+def test_known_section_types_require_the_declared_layout(kind, length, stub_size):
+    data = section_flags(thin(), kind, length=length, stub_size=stub_size)
+    result = macho.clean_macho(data, {})
+    assert result["status"] == "requires_review"
+    assert "unsupported_section_layout" in result["report"]["before"]["findings"]
+    assert "cleaned" not in result
+
+
+def refusal_artifact(kind):
+    return thin(extra=[command(0x31)]) if kind == "command" else section_flags(thin(), kind)
+
+
+@pytest.mark.parametrize("kind", ["command", 0x17, 0x01000000, 0xDEADBEEF])
+def test_http_single_and_batch_review_responses_never_include_bytes(kind):
+    data = refusal_artifact(kind)
+    service = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    thread = threading.Thread(target=service.serve_forever, daemon=True)
+    thread.start()
+    item = {
+        "file": base64.b64encode(data).decode("ascii"),
+        "name": "program",
+        "options": {"deterministic_only": True},
+    }
+    try:
+        for route, body in [("/clean", item), ("/clean/batch", {"files": [item]})]:
+            connection = http.client.HTTPConnection("127.0.0.1", service.server_port, timeout=10)
+            try:
+                connection.request(
+                    "POST",
+                    route,
+                    body=json.dumps(body),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                assert response.status == 200
+                result = json.loads(response.read())
+            finally:
+                connection.close()
+            if route.endswith("/batch"):
+                result = result["results"][0]
+            assert result["status"] == "requires_review"
+            assert result["report"]["release_ready"] is False
+            assert "cleaned" not in result
+    finally:
+        service.shutdown()
+        service.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("MACHO_ACCEPTANCE_CLIENT") or os.environ.get("ELF_ACCEPTANCE_CLIENT")),
+    reason="explicit installed native client only",
+)
+@pytest.mark.parametrize("kind", ["command", 0x17, 0x01000000, 0xDEADBEEF])
+def test_installed_client_review_refusal_preserves_input_and_never_writes_backup(kind, tmp_path):
+    data = refusal_artifact(kind)
+    source, output = tmp_path / "program", tmp_path / "program.inspected"
+    source.write_bytes(data)
+    before = source.stat()
+    service = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    thread = threading.Thread(target=service.serve_forever, daemon=True)
+    thread.start()
+    client = os.environ.get("MACHO_ACCEPTANCE_CLIENT") or os.environ["ELF_ACCEPTANCE_CLIENT"]
+    environment = {
+        **os.environ,
+        "WATERMARKS_SERVICE_URL": f"http://127.0.0.1:{service.server_port}",
+    }
+    try:
+        for arguments in (["--output", str(output)], ["--in-place"]):
+            result = subprocess.run(
+                [client, "--deterministic-only", "--json-report", *arguments, str(source)],
+                env=environment,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            assert result.returncode != 0
+            assert not output.exists()
+            assert source.read_bytes() == data
+            assert sorted(path.name for path in tmp_path.iterdir()) == ["program"]
+            after = source.stat()
+            assert (before.st_ino, before.st_size, before.st_mtime_ns) == (
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            )
+    finally:
+        service.shutdown()
+        service.server_close()
+        thread.join(timeout=5)
 
 
 def test_functional_load_string_is_validated_in_context_and_preserved():

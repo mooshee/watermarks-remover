@@ -479,7 +479,7 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                         ),
                         "cleaned": _schema(
                             type="string",
-                            description="Base64-encoded cleaned file bytes; omitted for ELF requires_review results",
+                            description="Base64-encoded cleaned file bytes; omitted for executable requires_review results",
                         ),
                         "status": _schema(
                             type="string",
@@ -639,7 +639,7 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                                     ),
                                     "cleaned": _schema(
                                         type="string",
-                                        description="Base64 bytes; omitted for ELF requires_review results",
+                                        description="Base64 bytes; omitted for executable requires_review results",
                                     ),
                                     "status": _schema(
                                         type="string",
