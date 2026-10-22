@@ -95,10 +95,15 @@ def _css_blocks(css: str) -> tuple[str, list[tuple[int, int]]]:
     while i < len(css):
         ch = css[i]
         if quote:
-            if ch == "\\":
+            if ch in "\r\n":
+                # CSS bad-string tokens end at an unescaped newline. Recover
+                # there without classifying the malformed declaration, so it
+                # cannot swallow unrelated valid rules later in the sheet.
+                quote = ""
+            elif ch == "\\":
                 i += 2
                 continue
-            if ch == quote:
+            elif ch == quote:
                 quote = ""
         elif ch in "\"'":
             quote = ch

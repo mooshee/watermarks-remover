@@ -52,8 +52,23 @@ actually installed vendor base `321d93d`. The fork's upstream-tracking `main`
 remains unchanged; this release does not silently upgrade the vendor package.
 The shared installed skill-description wording is preserved.
 
-Validation on the configured Python 3.12 runtime: 109 focused cases pass; the
-full suite has 1,221 passes, two optional skips and four pre-existing media
+Validation on the configured Python 3.12 runtime: 111 focused cases pass; the
+full suite has 1,223 passes, two optional skips and four pre-existing media
 failures. The same four failures reproduce on unchanged vendor base because the
 host ffmpeg cannot load `libx265.216.dylib`. No media pipeline or host library is
 changed by this release. All 100 Python files pass Ruff lint and format checks.
+
+The first fork CI run also found 24 existing advisories in optional Pillow
+12.3.0. The scorer, MarkLLM and CtrlRegen pins now consistently use Pillow 13.0.0;
+the audited scorer requirements resolve and `pip-audit` reports no known
+vulnerabilities. The optional Docker bases use Python 3.11 or 3.14, compatible
+with the [Pillow 13 release](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html).
+This does not enable an optional model backend or replace the installed core
+service's Python 3.12 runtime.
+
+Actual pre-deployment HTTP checks with the native client returned
+`inspected_no_change` for the previously blocked dashboard JavaScript and the
+hosted French HTML. Their original SHA-256 values were preserved. The older
+installed client also passed against the new automatic source mode. A malformed
+CSS string before valid icon rules is handled using CSS newline recovery; glyphs
+inside malformed declarations remain unresolved.

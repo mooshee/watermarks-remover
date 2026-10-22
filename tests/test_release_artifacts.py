@@ -79,6 +79,22 @@ def test_font_glyph_only_html_is_unchanged():
     assert base64.b64decode(result["cleaned"]) == source
 
 
+def test_bad_css_string_ends_at_newline_without_swallowing_later_valid_icons():
+    source = '<style>.broken{content:"unterminated\n;font-family:"unknown"}.menu:before{cursor:pointer;color:var(--black);content:"\uf0c9";font-family:"Font Awesome 5 Free";font-weight:700;font-size:14px}</style>'
+    result = server._clean_payload(source.encode(), "index.html", {})
+    assert result["status"] == "inspected_no_change"
+    assert len(result["report"]["after"]["preserved_functional_unicode"]) == 1
+    assert base64.b64decode(result["cleaned"]) == source.encode()
+
+
+def test_glyph_inside_bad_css_string_is_still_unresolved():
+    source = '<style>.broken{content:"\uf0c9\n;font-family:"Font Awesome 5 Free"}.menu{content:"\uf078";font-family:"Font Awesome 5 Free"}</style>'
+    result = server._clean_payload(source.encode(), "index.html", {})
+    assert result["status"] == "requires_review"
+    assert len(result["report"]["after"]["preserved_functional_unicode"]) == 1
+    assert result["report"]["after"]["applicable_unicode"]["suspicious_total"] == 1
+
+
 @pytest.mark.parametrize(
     "source",
     [
