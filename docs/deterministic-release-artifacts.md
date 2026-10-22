@@ -36,6 +36,73 @@ formats, invalid UTF-8 and inspection errors are errors, not clean results.
 Unsupported packages need a supported format-specific inspector; do not rename
 a binary or assert blanket package coverage.
 
+## Known release-text formats
+
+`cleaning_modes.known_release_text_inspection` advertises inspection-only support
+for `.xml`, `.sha256`, and the exact case-sensitive basenames `_headers`,
+`_redirects` and `LICENSE`. These select deterministic routing for both `/inspect`
+and `/clean`, including older clients without an explicit mode flag. Extensions
+are case-insensitive. Arbitrary extensionless names remain unsupported.
+
+All require strict UTF-8, reject binary signatures and control characters, and
+preserve original bytes. XML supports well-formed XML 1.0 with UTF-8 declarations
+or no declaration, using a non-building Expat parser version 2.6.0 or newer.
+DOCTYPE, entity declarations and external entities are refused before expansion;
+predefined XML references remain valid. The service does not fetch referenced
+resources, build a DOM or serialize XML. Limits are 4 MiB, depth 128,
+100,000 elements and 128 attributes/namespace declarations per element.
+Parsed C2PA/AI/provenance tag, attribute or processing-instruction targets and AI
+vendor names in generator metadata require review without output. Generator fields are bounded
+to 4,096 characters, including text split across parser callbacks. Functional
+URLs, ordinary body text and non-AI generator values are preserved; they are not
+searched as provenance strings. This is a bounded contextual classifier, not a
+claim to identify every possible XML metadata convention.
+
+SHA-256 manifests are limited to 64 KiB and 1,024 nonempty lines. Each has exactly
+64 hexadecimal digits, the standard two-space or space-asterisk separator, and
+a unique ASCII basename beginning with an alphanumeric character, followed by
+at most 254 alphanumeric/dot/underscore/hyphen characters. Paths, traversal,
+escaped filenames and duplicate targets are refused. LF and CRLF are preserved.
+This checks manifest syntax; it does not verify the target files' hashes.
+
+The three exact basenames are bounded UTF-8 text up to 4 MiB. Their acceptance
+does not establish deployment configuration, redirect/CSP policy, license
+semantics or permission. Raw source Unicode findings remain unresolved and no
+bytes are removed or normalized; new-format review responses omit `cleaned`.
+Rewrite, normalization, metadata-stripping and detector options are refused.
+Reports expose the format checks and limits, identical input/output hashes and
+explicit limitations. Success is bounded inspection evidence, not universal
+watermark absence or an authorship claim.
+
+## WebAssembly module inspection
+
+`cleaning_modes.wasm_core_v1_metadata_inspection` advertises bounded, read-only
+inspection for WebAssembly core module binary version 1. Magic bytes select this
+path before filename/text routing; a `.wasm` suffix alone does not certify a
+module. `/inspect` and `/clean` report `kind: executable`. Successful `/clean`
+returns `inspected_no_change`, identical SHA-256 values and the original bytes;
+review results omit `cleaned`. No code is executed, normalized or rewritten.
+
+Checks cover module/section framing, bounded ULEB128 values, standard-section
+ordering/uniqueness, function-body extents and function/code/data count agreement.
+Recognized `name`, `producers` and `target_features` custom metadata are parsed
+with bounded UTF-8 strings and entry counts. Compiler/runtime producer metadata
+and functional symbol names remain intact; functional code, data and symbol
+strings are not searched as prose. Explicit provenance in custom-section names
+or producer metadata requires review. Unknown custom metadata, name subsections,
+producer fields, target features and standard-section identifiers also require
+review. Unsupported versions and malformed supported framing fail closed.
+
+Limits: 256 MiB per module, 4,096 sections/name subsections, 16 MiB total custom
+metadata, 4,096 bytes per metadata string and 262,144 shared parsed vector entries.
+This is metadata and framing evidence, not semantic validation of standard
+section contents or instructions, signature trust, malware safety, universal
+watermark absence or an authorship claim. Normal build and review gates remain
+necessary. [WebAssembly binary modules](https://webassembly.github.io/spec/core/binary/modules.html)
+and the [producer](https://github.com/WebAssembly/tool-conventions/blob/main/ProducersSection.md)
+and [target-feature](https://github.com/WebAssembly/tool-conventions/blob/main/Linking.md#target-features-section)
+conventions define the inspected layouts.
+
 ## Mach-O executable inspection
 
 Thin 32/64-bit and universal (fat32/fat64) Mach-O executable bytes now select a

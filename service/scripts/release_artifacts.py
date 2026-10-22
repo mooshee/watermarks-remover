@@ -15,6 +15,7 @@ import re
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from xml.parsers import expat
 
 from common import looks_binary
 from container_meta import AI_META_NAME_RE, inspect_html, inspect_markdown
@@ -23,6 +24,29 @@ from text_unicode import inspect_text
 
 RELEASE_TEXT_EXTS = TEXT_EXTS - {".txt", ".text", ".rst", ".adoc", ".asciidoc", ".org", ".tex"}
 RELEASE_CONTAINER_EXTS = {".html", ".htm", ".md", ".markdown", ".mdx"}
+KNOWN_RELEASE_NAMES = {"_headers", "_redirects", "LICENSE"}
+KNOWN_RELEASE_EXTS = {".xml", ".sha256"}
+MAX_KNOWN_TEXT_BYTES = 4 << 20
+MAX_CHECKSUM_BYTES = 64 << 10
+MAX_CHECKSUM_LINES = 1024
+MAX_XML_DEPTH = 128
+MAX_XML_ELEMENTS = 100_000
+MAX_XML_ATTRIBUTES = 128
+MAX_XML_METADATA_CHARS = 4096
+_CHECKSUM_LINE = re.compile(r"[0-9a-fA-F]{64} [ *]([A-Za-z0-9][A-Za-z0-9._-]{0,254})")
+_XML_C2PA_FIELDS = {"c2pa", "jumbf", "contentcredentials", "content-credentials"}
+_XML_AI_FIELDS = {
+    "ai-generated",
+    "ai_generated",
+    "ai-provenance",
+    "ai_provenance",
+    "synthid",
+    "aigc",
+}
+_XML_GENERATOR_FIELDS = {"generator", "generated-by", "generatedby", "creator-tool", "creatortool"}
+_XML_AI_GENERATOR = re.compile(
+    r"\b(?:openai|anthropic|chatgpt|claude|gemini|synthid|aigc)\b|\bai[-_ ]generated\b", re.I
+)
 _FONT_AWESOME_NAMES = {"fontawesome"} | {
     f"font awesome {version} {variant}"
     for version in (4, 5, 6)
@@ -31,7 +55,222 @@ _FONT_AWESOME_NAMES = {"fontawesome"} | {
 
 
 def automatic_release_mode(name: str) -> bool:
-    return Path(name).suffix.lower() in RELEASE_TEXT_EXTS | {".html", ".htm"}
+    return known_release_text(name) or Path(name).suffix.lower() in RELEASE_TEXT_EXTS | {
+        ".html",
+        ".htm",
+    }
+
+
+def known_release_text(name: str) -> bool:
+    path = Path(name)
+    return path.name in KNOWN_RELEASE_NAMES or path.suffix.lower() in KNOWN_RELEASE_EXTS
+
+
+def _xml_structure(text: str) -> dict[str, Any]:
+    """Non-building XML parser: declarations/entities are rejected before expansion."""
+    if expat.version_info < (2, 6, 0):
+        raise ValueError("XML inspection requires Expat 2.6.0 or newer")
+    parser = expat.ParserCreate(encoding="UTF-8", namespace_separator="}")
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.UseForeignDTD(False)
+    depth = elements = deepest = namespaces = 0
+    findings: set[str] = set()
+    captures: list[dict[str, Any]] = []
+
+    def metadata_name(name: str) -> str:
+        namespace_uri, _, local = name.rpartition("}")
+        local = local.lower()
+        namespace_tokens = re.split(r"[/#:.]", namespace_uri.lower())
+        if local in _XML_C2PA_FIELDS or "c2pa" in namespace_tokens:
+            findings.add("explicit_xml_c2pa_metadata")
+        elif local in _XML_AI_FIELDS:
+            findings.add("explicit_xml_ai_provenance")
+        elif local == "provenance":
+            findings.add("explicit_xml_provenance_metadata")
+        return local
+
+    def generator_value(value: str) -> None:
+        if len(value) > MAX_XML_METADATA_CHARS:
+            raise ValueError("XML metadata field exceeds inspection bound")
+        if _XML_AI_GENERATOR.search(value):
+            findings.add("explicit_xml_ai_generator")
+
+    def forbidden(*args: Any) -> None:
+        raise ValueError("XML inspection rejects DOCTYPE and entity declarations/references")
+
+    def declaration(version: str, encoding: str | None, standalone: int) -> None:
+        if version != "1.0" or (encoding is not None and encoding.lower() not in {"utf-8", "utf8"}):
+            raise ValueError("XML inspection supports only XML 1.0 with UTF-8 encoding")
+
+    def start(name: str, attributes: dict[str, str]) -> None:
+        nonlocal depth, elements, deepest, namespaces
+        depth += 1
+        elements += 1
+        deepest = max(deepest, depth)
+        if (
+            depth > MAX_XML_DEPTH
+            or elements > MAX_XML_ELEMENTS
+            or len(attributes) + namespaces > MAX_XML_ATTRIBUTES
+        ):
+            raise ValueError("XML structural inspection limits exceeded")
+        namespaces = 0
+        local = metadata_name(name)
+        local_attributes: dict[str, list[str]] = {}
+        for key, value in attributes.items():
+            field = metadata_name(key)
+            local_attributes.setdefault(field, []).append(value)
+            if field in _XML_GENERATOR_FIELDS:
+                generator_value(value)
+        capture = local in _XML_GENERATOR_FIELDS
+        if local in {"meta", "metadata"}:
+            for selector in local_attributes.get("name", []) + local_attributes.get("property", []):
+                if metadata_name(selector) in _XML_GENERATOR_FIELDS:
+                    for value in local_attributes.get("content", []) + local_attributes.get(
+                        "value", []
+                    ):
+                        generator_value(value)
+                    capture = True
+        if capture:
+            captures.append({"depth": depth, "parts": [], "size": 0})
+
+    def namespace(prefix: str | None, uri: str | None) -> None:
+        nonlocal namespaces
+        namespaces += 1
+        if namespaces > MAX_XML_ATTRIBUTES:
+            raise ValueError("XML structural inspection limits exceeded")
+
+    def end(name: str) -> None:
+        nonlocal depth
+        if captures and captures[-1]["depth"] == depth:
+            generator_value("".join(captures.pop()["parts"]))
+        depth -= 1
+
+    def characters(value: str) -> None:
+        for capture in captures:
+            capture["size"] += len(value)
+            if capture["size"] > MAX_XML_METADATA_CHARS:
+                raise ValueError("XML metadata field exceeds inspection bound")
+            capture["parts"].append(value)
+
+    def processing_instruction(target: str, value: str) -> None:
+        if metadata_name(target) in _XML_GENERATOR_FIELDS:
+            generator_value(value)
+
+    parser.StartDoctypeDeclHandler = forbidden
+    parser.EntityDeclHandler = forbidden
+    parser.ExternalEntityRefHandler = forbidden
+    parser.XmlDeclHandler = declaration
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.StartNamespaceDeclHandler = namespace
+    parser.CharacterDataHandler = characters
+    parser.ProcessingInstructionHandler = processing_instruction
+    try:
+        parser.Parse(text, True)
+    except expat.ExpatError as exc:
+        raise ValueError("XML inspection requires well-formed XML") from exc
+    return {
+        "format": "xml",
+        "validation": "well-formed XML 1.0; no DTD or declared entities",
+        "elements": elements,
+        "maximum_depth": deepest,
+        "metadata_findings": sorted(findings),
+        "has_c2pa": "explicit_xml_c2pa_metadata" in findings,
+        "has_ai_metadata": bool(
+            findings & {"explicit_xml_ai_provenance", "explicit_xml_ai_generator"}
+        ),
+        "review_required": bool(findings),
+        "limits": {
+            "depth": MAX_XML_DEPTH,
+            "elements": MAX_XML_ELEMENTS,
+            "attributes_per_element": MAX_XML_ATTRIBUTES,
+            "metadata_field_characters": MAX_XML_METADATA_CHARS,
+        },
+    }
+
+
+def _known_text_structure(text: str, name: str) -> dict[str, Any]:
+    if any((ord(ch) < 32 and ch not in "\t\r\n") or ord(ch) == 127 for ch in text):
+        raise ValueError("known release text rejects binary/control characters")
+    suffix = Path(name).suffix.lower()
+    if suffix == ".xml":
+        return _xml_structure(text)
+    if suffix == ".sha256":
+        lines = text.split("\n")
+        if lines[-1] == "":
+            lines.pop()
+        if not 0 < len(lines) <= MAX_CHECKSUM_LINES:
+            raise ValueError("SHA-256 manifest line count outside bound")
+        filenames: set[str] = set()
+        for index, line in enumerate(lines):
+            if line.endswith("\r") and index == len(lines) - 1 and not text.endswith("\n"):
+                raise ValueError("SHA-256 manifest requires LF or CRLF line endings")
+            match = _CHECKSUM_LINE.fullmatch(line.removesuffix("\r"))
+            if match is None or match[1] in filenames:
+                raise ValueError(
+                    "SHA-256 manifest requires exact hex checksum lines with unique safe basenames"
+                )
+            filenames.add(match[1])
+        return {
+            "format": "sha256",
+            "validation": "checksum-line syntax and safe basenames only",
+            "entries": len(lines),
+            "target_hashes_verified": False,
+        }
+    return {
+        "format": "known_text",
+        "name": Path(name).name,
+        "validation": "UTF-8 text only; configuration/license semantics are not validated",
+    }
+
+
+def _release_text(data: bytes, name: str) -> tuple[str, dict[str, Any] | None]:
+    known = known_release_text(name)
+    limit = MAX_CHECKSUM_BYTES if Path(name).suffix.lower() == ".sha256" else MAX_KNOWN_TEXT_BYTES
+    if known and len(data) > limit:
+        raise ValueError("known release text size outside bound")
+    if looks_binary(data):
+        raise ValueError("refusing binary bytes in a deterministic text artifact")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("deterministic artifact inspection requires valid UTF-8") from exc
+    structure = _known_text_structure(text, name) if known else None
+    if structure is not None:
+        structure["artifact_byte_limit"] = limit
+        structure["inspection_only"] = True
+    return text, structure
+
+
+def _unresolved(report: dict[str, Any]) -> bool:
+    return bool(
+        report["applicable_unicode"]["suspicious_total"]
+        or report["has_c2pa"]
+        or report["has_ai_metadata"]
+        or report.get("format_inspection", {}).get("review_required", False)
+    )
+
+
+def inspect_known_release_text(data: bytes, name: str) -> dict[str, Any]:
+    if not known_release_text(name):
+        raise ValueError("unsupported release text name/format")
+    text, structure = _release_text(data, name)
+    report = _inspection(text, name, structure)
+    unresolved = _unresolved(report)
+    digest = hashlib.sha256(data).hexdigest()
+    return {
+        **report,
+        "format_inspection": structure,
+        "mode": "deterministic_only",
+        "suspicious_total": report["applicable_unicode"]["suspicious_total"],
+        "status": "requires_review" if unresolved else "inspected_no_change",
+        "changed": False,
+        "release_ready": not unresolved,
+        "review_required": unresolved,
+        "input_sha256": digest,
+        "output_sha256": digest,
+        "limitations": "Bounded format syntax, contextual metadata and raw source Unicode inspection only; no schema/configuration/license validation, checksum target verification, external resources, universal watermark or authorship claim. Original bytes are preserved.",
+    }
 
 
 class _HTMLSpans(HTMLParser):
@@ -197,7 +436,7 @@ def _css_value(value: str) -> str:
     return stripped
 
 
-def _inspection(text: str, name: str) -> dict[str, Any]:
+def _inspection(text: str, name: str, structure: dict[str, Any] | None = None) -> dict[str, Any]:
     suffix = Path(name).suffix.lower()
     spans = _HTMLSpans(text) if suffix in {".html", ".htm"} else None
     if spans is not None:
@@ -216,7 +455,12 @@ def _inspection(text: str, name: str) -> dict[str, Any]:
         has_c2pa, has_ai, metadata_findings, _ = inspect_html(text)
     elif suffix in {".md", ".markdown", ".mdx"}:
         has_c2pa, has_ai, metadata_findings, _ = inspect_markdown(text)
+    if structure is not None:
+        has_c2pa |= structure.get("has_c2pa", False)
+        has_ai |= structure.get("has_ai_metadata", False)
+        metadata_findings.extend(structure.get("metadata_findings", []))
     return {
+        **({"format_inspection": structure} if structure is not None else {}),
         "unicode": unicode_report,
         "applicable_unicode": applicable_unicode,
         "has_c2pa": has_c2pa,
@@ -236,22 +480,20 @@ def _inspection(text: str, name: str) -> dict[str, Any]:
 def clean_release_artifact(data: bytes, name: str, options: dict[str, Any]) -> dict[str, Any]:
     from elf_metadata import clean_elf, is_elf
     from macho_metadata import clean_macho, is_macho
+    from wasm_metadata import clean_wasm, is_wasm
 
+    if is_wasm(data):
+        return clean_wasm(data, options)
     if is_elf(data):
         return clean_elf(data, options)
     if is_macho(data):
         return clean_macho(data, options)
     suffix = Path(name).suffix.lower()
-    if suffix not in TEXT_EXTS | RELEASE_CONTAINER_EXTS:
+    if suffix not in TEXT_EXTS | RELEASE_CONTAINER_EXTS and not known_release_text(name):
         raise ValueError(
             "deterministic_only requires a supported source, configuration, text, HTML or Markdown filename"
         )
-    if looks_binary(data):
-        raise ValueError("refusing binary bytes in a deterministic text artifact")
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError("deterministic artifact inspection requires valid UTF-8") from exc
+    text, structure = _release_text(data, name)
     incompatible = {
         "strategy",
         "style",
@@ -263,11 +505,13 @@ def clean_release_artifact(data: bytes, name: str, options: dict[str, Any]) -> d
         "detect_before",
         "detect_after",
     }
+    if structure is not None:
+        incompatible.add("strip_all_metadata")
     if any(options.get(key) for key in incompatible):
         raise ValueError(
             "deterministic_only cannot rewrite, normalize, run detectors or transform content"
         )
-    before = _inspection(text, name)
+    before = _inspection(text, name, structure)
     cleaned = text
     actions: list[str] = []
     if suffix in {".html", ".htm"}:
@@ -277,21 +521,16 @@ def clean_release_artifact(data: bytes, name: str, options: dict[str, Any]) -> d
         for start, end in reversed(spans.metadata):
             cleaned = cleaned[:start] + cleaned[end:]
         actions = spans.actions
-    after = _inspection(cleaned, name)
-    unresolved = bool(
-        after["applicable_unicode"]["suspicious_total"]
-        or after["has_c2pa"]
-        or after["has_ai_metadata"]
-    )
+    after = _inspection(cleaned, name, structure)
+    unresolved = _unresolved(after)
     output = cleaned.encode("utf-8")
     changed = output != data
     status = "requires_review" if unresolved else "cleaned" if changed else "inspected_no_change"
     kind = "container" if suffix in RELEASE_CONTAINER_EXTS else "text"
-    return {
+    result = {
         "ok": True,
         "kind": kind,
         "status": status,
-        "cleaned": base64.b64encode(output).decode("ascii"),
         "report": {
             "mode": "deterministic_only",
             "status": status,
@@ -306,3 +545,10 @@ def clean_release_artifact(data: bytes, name: str, options: dict[str, Any]) -> d
             "limitations": "Deterministic metadata/Unicode inspection only; no authorship or universal watermark claim. Any changed bytes require diff, affected tests and review before publication.",
         },
     }
+    if not (structure is not None and unresolved):
+        result["cleaned"] = base64.b64encode(output).decode("ascii")
+    if structure is not None:
+        result["report"]["limitations"] = (
+            "Bounded format syntax, contextual metadata and raw source Unicode inspection only; no schema/configuration/license validation, checksum target verification, external resources, universal watermark or authorship claim. Original bytes are preserved."
+        )
+    return result
