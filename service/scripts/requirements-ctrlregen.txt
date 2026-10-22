@@ -10,7 +10,7 @@
 # noai-watermark commit before bumping.
 #
 # Security expectation: several of these research pins (transformers 4.37.2,
-# diffusers 0.27.2, Pillow 12.3.0) carry published advisories. They are
+# diffusers 0.27.2) carry published advisories. They are
 # deliberately NOT updated to current versions because the upstream code
 # does not run on them. This file is therefore only ever installed inside
 # the dedicated venv created by setup_ctrlregen.sh (service profile
@@ -28,5 +28,5 @@ safetensors==0.8.0
 # symbol that diffusers 0.27.2 still imports. Unpinned, pip resolves latest
 # (0.36.2) and the backend fails to import.
 huggingface_hub==0.24.0
-Pillow==12.3.0
+Pillow==13.0.0
 piexif==1.1.3

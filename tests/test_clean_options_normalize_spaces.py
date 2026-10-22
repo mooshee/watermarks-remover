@@ -6,7 +6,8 @@ U+202F to ordinary spaces with no way to decline. The agent skill is one of
 those callers, which put French, and any language whose typography relies on
 a non-breaking space, out of its reach.
 
-Default stays True: existing callers see no change.
+Prose defaults stay True. Release HTML keeps source bytes and reports unresolved
+carriers for a reviewed source fix rather than stripping them during release.
 """
 
 from __future__ import annotations
@@ -71,8 +72,10 @@ def test_markdown_payload_still_normalizes_by_default():
 
 def test_html_payload_honours_the_option():
     out = _clean({"normalize_spaces": False}, name="page.html")
-    assert out.count(NBSP) == FRENCH.count(NBSP)
-    assert ZWSP not in out
+    assert out == FRENCH
+    result = server._clean_payload(FRENCH.encode(), "page.html", {"normalize_spaces": False})
+    assert result["status"] == "requires_review"
+    assert result["report"]["release_ready"] is False
 
 
 def test_ooxml_and_odt_runs_honour_the_option():

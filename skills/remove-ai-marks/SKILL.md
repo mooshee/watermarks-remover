@@ -1,13 +1,6 @@
 ---
 name: remove-ai-marks
-description: >
-  Remove multi-vendor AI provenance marks: invisible Unicode (Layer A), statistical
-  text watermarks via rewrite (Layer B, always offer), and C2PA/EXIF/XMP/container
-  metadata on PNG/JPEG/WebP/SVG/PDF/DOCX/ODT/HTML/MD. Covers Claude, Gemini/SynthID-class,
-  OpenAI provenance, and open-LLM sampling marks. Use when the user asks to strip
-  watermarks, remove C2PA/Content Credentials, clean AI metadata, remove invisible
-  Unicode, anti-detect clean AI output, or runs /remove-ai-marks (aliases:
-  /remove-claude-marks).
+description: "Clean authorized content for publication with the local remove-ai-marks service and inspect the result."
 ---
 
 # Remove AI marks
@@ -25,8 +18,47 @@ Read if needed:
 
 This skill is a **thin client**. All deterministic cleaning machinery runs in a
 separate HTTP service (this repo's `service/`), so the agent host needs no
-Python, venvs, or cleaning tools. Call the service with `curl`; never run
-cleaning scripts directly.
+Python, venvs, or cleaning tools. Prefer the native `remove-ai-marks` CLI; use
+the documented HTTP contract with `xh` when a CLI capability is missing. Never
+run cleaning scripts directly on publishable content.
+
+## Reviewed release artifacts
+
+This section takes precedence over the prose workflow below for executable
+code, configuration, structured data, generated bundles, packages and release
+HTML. Use deterministic inspection and applicable metadata cleanup only:
+
+```sh
+remove-ai-marks --health
+remove-ai-marks --deterministic-only --json-report app.js
+remove-ai-marks --deterministic-only --metadata-only --json-report index.html
+```
+
+The release service automatically uses this path for recognized source,
+configuration/data and HTML extensions, including calls from older clients.
+Explicitly select `--deterministic-only` for pinned Markdown or plain text.
+`--metadata-only` exposes the container option `also_layer_a_text=false`.
+Unknown packages/formats require a supported format-specific inspection;
+renaming an unsupported binary to a text extension is not a workaround.
+
+- `inspected_no_change` is success: retain the report and SHA-256 and publish
+  those identical reviewed bytes. A missing rewrite backend is irrelevant.
+- `cleaned` means a narrow deterministic metadata edit changed bytes. Inspect
+  its diff and rerun affected tests and review before pinning/publishing it.
+- `requires_review` preserves unclassified source characters and blocks output
+  in the native client. Fix a real source finding narrowly, test/review, and
+  inspect the resulting artifact again. Never strip source characters blindly.
+- Preserve Font Awesome U+F078/U+F0C9 only in an actual CSS `content` declaration
+  with an explicit matching font family. Record that context in the report.
+  Arbitrary private-use characters remain unresolved.
+- Failed inspection, invalid UTF-8 and unknown formats block that artifact.
+  Never substitute formatting, paraphrasing, identifier renaming, Unicode
+  normalization or generative rewriting during release cleanup.
+
+The native client checks mode confirmation, input/output hashes and no-change
+byte identity before any output or in-place backup write. A metadata edit is
+not permission to skip review. Deterministic results make no authorship or
+universal-watermark claim. Keep the source and the actual receipt.
 
 ## Service access
 
@@ -87,7 +119,9 @@ The machine-readable contract lives at `$WM/openapi.json` — plug it into any
 OpenAPI tooling (client generators, Swagger UI, editors) instead of hand-rolling
 clients.
 
-`options` accepted by `/clean`: `nfkc`, `aggressive_homoglyphs` (text),
+`options` accepted by `/clean`: `deterministic_only` (release inspection; no
+rewrite backend, formatter, normalization or detector calls),
+`nfkc`, `aggressive_homoglyphs` (prose text),
 `keep_non_ai_metadata`, `strip_all_metadata`, `remove_pixel` (`ctrlregen` |
 `diffusion`) (images and video), `also_layer_a_text` (containers), `deep_images`
 (`auto` | `always` | `lossless` | `never`, PDF: how hard to chase metadata
@@ -129,8 +163,10 @@ Intended for **your own** content (privacy, hygiene, research). Do not market re
 | Input | Route |
 | --- | --- |
 | Pasted / clipboard text | temp file → `/inspect` then `/clean` (text) |
-| `.txt` / code | text Layer A (+ formatter for code) |
-| `.md` / `.html` | container clean (frontmatter/meta) + Layer A; Layer B to the prose via a `/clean` text pass or the agent rewrite model |
+| Reviewed code / config / data / bundles / release HTML | deterministic release path above; never format or rewrite |
+| `.txt` prose | text Layer A; Layer B only within authorized prose rewrite scope |
+| Pinned `.md` | explicit deterministic release path; no automatic prose rewrite |
+| Other `.md` / prose `.html` | preserve wording; metadata/container cleanup; meaning-changing rewrite needs its own authorized scope |
 | `.png` / `.jpg` / `.jpeg` / `.webp` / `.avif` / `.heic` / `.bmp` / `.gif` / `.tiff` | image metadata strip |
 | `.svg` / `.pdf` / `.docx` / `.epub` / `.odt` | container metadata strip |
 | Directory / website | aggregate audit via the service CLIs (see below) |
@@ -172,7 +208,10 @@ Or fold detection into the clean: `/clean` with
 detector is not public yet. (Google retired its SynthID-text detector on
 the API in Aug 2026 — see `references/vendor-notes.md`.)
 
-### 3. Deterministic clean (always for matching inputs)
+### 3. Format-specific cleanup
+
+For reviewed release artifacts use the deterministic release workflow above.
+The general calls below retain the service's established prose/media behavior.
 
 **Any supported file (unified):**
 
@@ -196,9 +235,11 @@ curl -s -X POST "$WM/clean" -H 'Content-Type: application/json' \
        \"options\": {\"remove_pixel\": \"ctrlregen\"}}"
 ```
 
-### 4. Layer B — always offer rewrite (prose)
+### 4. Layer B — only within authorized prose rewrite scope
 
-After Layer A, **always propose** a statistical-mark reduction pass for natural-language content. Do not skip this step silently.
+Keep prose wording unless the task authorizes a meaning-changing rewrite.
+Explain any configured rewrite before using it. Do not require or propose a
+prose rewrite for executable artifacts or as a deployment gate.
 
 For **plain text** (pasted / `.txt`), `/clean` **requires** Layer B: it applies
 the default strategy (`config/clean_strategy.json`, e.g.
@@ -221,7 +262,9 @@ Multi-pass recipe:
 4. Layer A again on the result (`/clean`)  
 5. Report residual risk honestly (short/highly predictable text = lower; long, high-entropy prose = higher)  
 
-**Code files:** Prefer formatter (`prettier`, `black`, `gofmt`, …) + Layer A. Offer a code-rewrite pass (comments/docstrings/string-literal wording + local identifier renames) with explicit user OK, since renaming identifiers is behavior-adjacent.
+**Code files:** Use deterministic release inspection. Formatting and ordinary
+code edits belong before tests and review; never rewrite comments, strings or
+identifiers as a release-cleanup operation.
 
 #### Rewrite prompts (use as-is)
 
