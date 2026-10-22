@@ -67,6 +67,7 @@ from common import (
 from container_meta import DEEP_IMAGE_MODES, clean_container, inspect_container
 from format_dispatch import classify_bytes
 from image_meta import clean_image, inspect_image, run_synthid_score, synthid_is_watermarked
+from release_artifacts import automatic_release_mode, clean_release_artifact
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
 from text_unicode import clean_text, inspect_text
@@ -87,6 +88,7 @@ MAX_BODY_BYTES = MAX_INPUT_BYTES + (MAX_INPUT_BYTES >> 1)
 MAX_BATCH_FILES = int(os.environ.get("WATERMARKS_MAX_BATCH_FILES", "50"))
 
 ALLOWED_CLEAN_OPTIONS = {
+    "deterministic_only": bool,
     "nfkc": bool,
     "aggressive_homoglyphs": bool,
     "normalize_spaces": bool,
@@ -182,6 +184,7 @@ def _tool_usable(cmd: str) -> bool:
 def capabilities() -> dict[str, Any]:
     return {
         "version": VERSION,
+        "cleaning_modes": {"deterministic_only": True},
         "tools": {
             "c2patool": _tool_usable("c2patool"),
             "exiftool": _tool_usable("exiftool"),
@@ -458,6 +461,11 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                         "kind": _schema(type="string", enum=["text", "image", "container", "av"]),
                         "cleaned": _schema(
                             type="string", description="Base64-encoded cleaned file bytes"
+                        ),
+                        "status": _schema(
+                            type="string",
+                            enum=["inspected_no_change", "cleaned", "requires_review"],
+                            description="Deterministic mode status; changed bytes require diff/tests/review, unresolved findings block publication.",
                         ),
                         "report": _schema(type="object"),
                     },
@@ -1020,6 +1028,8 @@ def _detect_payload(data: bytes, name: str) -> dict[str, Any]:
 
 
 def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str, Any]:
+    if options.get("deterministic_only") or automatic_release_mode(name):
+        return clean_release_artifact(data, name, options)
     kind = classify_bytes(data, Path(name).suffix)
     if kind == "unknown":
         raise ValueError(
