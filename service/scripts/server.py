@@ -65,6 +65,7 @@ from common import (
     which,
 )
 from container_meta import DEEP_IMAGE_MODES, clean_container, inspect_container
+from elf_metadata import inspect_elf, is_elf
 from format_dispatch import classify_bytes
 from image_meta import clean_image, inspect_image, run_synthid_score, synthid_is_watermarked
 from macho_metadata import inspect_macho, is_macho
@@ -185,7 +186,11 @@ def _tool_usable(cmd: str) -> bool:
 def capabilities() -> dict[str, Any]:
     return {
         "version": VERSION,
-        "cleaning_modes": {"deterministic_only": True, "mach_o_executable_inspection": True},
+        "cleaning_modes": {
+            "deterministic_only": True,
+            "mach_o_executable_inspection": True,
+            "elf64_amd64_executable_inspection": True,
+        },
         "tools": {
             "c2patool": _tool_usable("c2patool"),
             "exiftool": _tool_usable("exiftool"),
@@ -373,6 +378,7 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                             properties={
                                 "deterministic_only": _schema(type="boolean"),
                                 "mach_o_executable_inspection": _schema(type="boolean"),
+                                "elf64_amd64_executable_inspection": _schema(type="boolean"),
                             },
                         ),
                         "tools": _schema(
@@ -472,7 +478,8 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                             type="string", enum=["text", "image", "container", "av", "executable"]
                         ),
                         "cleaned": _schema(
-                            type="string", description="Base64-encoded cleaned file bytes"
+                            type="string",
+                            description="Base64-encoded cleaned file bytes; omitted for ELF requires_review results",
                         ),
                         "status": _schema(
                             type="string",
@@ -630,7 +637,14 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                                         type="string",
                                         enum=["text", "image", "container", "av", "executable"],
                                     ),
-                                    "cleaned": _schema(type="string"),
+                                    "cleaned": _schema(
+                                        type="string",
+                                        description="Base64 bytes; omitted for ELF requires_review results",
+                                    ),
+                                    "status": _schema(
+                                        type="string",
+                                        enum=["inspected_no_change", "cleaned", "requires_review"],
+                                    ),
                                     "report": _schema(type="object"),
                                     "error": _schema(type="string"),
                                 },
@@ -968,10 +982,10 @@ def _suspicious_report(report: dict[str, Any]) -> dict[str, Any]:
 
 def _inspect_payload(data: bytes, name: str, run_detect: bool) -> dict[str, Any]:
     """Inspect a file and return findings plus a structured suspicious report."""
-    if is_macho(data):
+    if is_macho(data) or is_elf(data):
         if run_detect:
             raise ValueError("watermark detectors do not support executable bytes")
-        report = inspect_macho(data)
+        report = inspect_elf(data) if is_elf(data) else inspect_macho(data)
         suspicious = _suspicious_report(report)
         suspicious["verdict"] = bool(report["findings"])
         suspicious["classes"]["executable_metadata"] = {
@@ -1013,7 +1027,7 @@ def _inspect_payload(data: bytes, name: str, run_detect: bool) -> dict[str, Any]
 
 
 def _detect_payload(data: bytes, name: str) -> dict[str, Any]:
-    if is_macho(data):
+    if is_macho(data) or is_elf(data):
         raise ValueError("watermark detectors do not support executable bytes")
     kind = classify_bytes(data, Path(name).suffix)
     with tempfile.TemporaryDirectory(prefix="wm-detect-") as tmp:
@@ -1063,7 +1077,12 @@ def _detect_payload(data: bytes, name: str) -> dict[str, Any]:
 
 
 def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str, Any]:
-    if is_macho(data) or options.get("deterministic_only") or automatic_release_mode(name):
+    if (
+        is_macho(data)
+        or is_elf(data)
+        or options.get("deterministic_only")
+        or automatic_release_mode(name)
+    ):
         return clean_release_artifact(data, name, options)
     kind = classify_bytes(data, Path(name).suffix)
     if kind == "unknown":

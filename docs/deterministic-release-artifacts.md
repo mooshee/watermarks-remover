@@ -97,6 +97,50 @@ actually installed vendor base `321d93d`. The fork's upstream-tracking `main`
 remains unchanged; this release does not silently upgrade the vendor package.
 The shared installed skill-description wording is preserved.
 
+## ELF executable inspection
+
+`cleaning_modes.elf64_amd64_executable_inspection` advertises a separate read-only
+path for ELF64 little-endian AMD64 `ET_EXEC` and `ET_DYN` executables. Magic-byte
+routing selects it before filenames for `/inspect`, `/clean` and their batch
+forms, including requests from existing native clients. Valid supported bytes
+return `kind: executable`, deterministic mode, `inspected_no_change`, identical
+SHA-256 values, `changed: false` and `actions: []`. An ELF `requires_review`
+response omits `cleaned`; the native client must not write output or a backup.
+The current installed client refuses that response before displaying its report
+and says `service response did not include cleaned bytes`; use `/inspect` to
+retain the findings. This affects review results, not successful no-change output.
+
+Inspection validates header versions, class, byte order, AMD64 identity, ABI,
+sizes and bounded program/section tables; load ordering, ranges, address/file
+alignment, entry coverage and non-overlap; section names, string-table ranges,
+symbol/dynamic string references and complete fixed-size entries; and note
+owner/descriptor extents, terminators, padding and alignment. Nonzero bytes
+outside sections and header tables are rejected. Complete section and name
+tables are required; extended numbering, compressed sections and unsupported
+architectures/encodings fail closed. Unknown program/section metadata, note
+owners/types and GNU property types require review.
+
+GNU build IDs, ABI tags, supported GNU properties, compiler comment strings,
+GNU linker retention flags and ordinary runtime/linker metadata remain intact.
+Explicit provenance section names, note owners, textual unknown-note descriptors
+and compiler-comment metadata require review. Functional `.text.*`/`.data.*`
+section names and symbol strings are not treated as provenance. Code, constants,
+string data, debug payloads and functional linker paths are not searched as prose
+or passed to Unicode/model/detector backends. Nothing is removed or modified.
+
+Limits: 256 MiB per artifact; 4,096 program headers, sections, notes and GNU
+properties per descriptor and compiler-comment strings; 16 MiB total section metadata and 16 MiB program-note
+inspection; 4,096 bytes per inspected metadata/functional string; 1,048,576
+symbol/dynamic entries. Unclassified metadata blocks output. A successful result
+is bounded structural/metadata evidence, not semantic program validation,
+signature trust, malware safety, external-resource inspection, universal watermark
+absence or an authorship claim.
+
+Definitions: [System V ELF ABI](https://gabi.xinuos.com/elf/),
+[Linux ELF headers](https://github.com/torvalds/linux/blob/master/include/uapi/linux/elf.h)
+and [GNU C Library ELF definitions](https://github.com/bminor/glibc/blob/master/elf/elf.h).
+The service keeps its vendor Python runtime; the operator client remains Rust.
+
 Validation on the configured Python 3.12 runtime: 112 focused cases pass; the
 full suite has 1,224 passes, two optional skips and four pre-existing media
 failures. The same four failures reproduce on unchanged vendor base because the
