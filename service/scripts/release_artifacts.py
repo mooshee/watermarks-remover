@@ -23,11 +23,11 @@ from text_unicode import inspect_text
 
 RELEASE_TEXT_EXTS = TEXT_EXTS - {".txt", ".text", ".rst", ".adoc", ".asciidoc", ".org", ".tex"}
 RELEASE_CONTAINER_EXTS = {".html", ".htm", ".md", ".markdown", ".mdx"}
-_FONT_AWESOME = re.compile(
-    r"\s*(['\"])(?:Font Awesome [456] (?:Free|Pro|Brands)|FontAwesome)\1\s*(?:!important\s*)?",
-    re.I,
-)
-_ICON_CONTENT = re.compile(r"\s*(['\"])([\uf078\uf0c9])\1\s*(?:!important\s*)?", re.I)
+_FONT_AWESOME_NAMES = {"fontawesome"} | {
+    f"font awesome {version} {variant}"
+    for version in (4, 5, 6)
+    for variant in ("free", "pro", "brands")
+}
 
 
 def automatic_release_mode(name: str) -> bool:
@@ -143,7 +143,7 @@ def _css_declarations(body: str) -> list[tuple[str, str, int]]:
             declaration = body[start:i]
             if declaration.strip():
                 key, colon, value = declaration.partition(":")
-                if not colon or not re.fullmatch(r"\s*[a-zA-Z-]+\s*", key):
+                if not colon or not re.fullmatch(r"[a-zA-Z-]+", key.strip()):
                     return []
                 declarations.append((key.strip().lower(), value, start + len(key) + 1))
             start = i + 1
@@ -169,13 +169,32 @@ def _functional_glyph_offsets(css: str, start: int) -> set[int]:
             or any(key in {"font", "all"} for key, _, _ in declarations)
         ):
             continue
-        if not _FONT_AWESOME.fullmatch(fonts[0][0]):
+        font = _css_value(fonts[0][0])
+        if (
+            len(font) < 2
+            or font[0] not in "\"'"
+            or font[-1] != font[0]
+            or font[1:-1].lower() not in _FONT_AWESOME_NAMES
+        ):
             continue
         value, offset = content[0]
-        match = _ICON_CONTENT.fullmatch(value)
-        if match:
-            offsets.add(start + begin + offset + match.start(2))
+        icon = _css_value(value)
+        if (
+            len(icon) == 3
+            and icon[0] in "\"'"
+            and icon[-1] == icon[0]
+            and icon[1] in "\uf078\uf0c9"
+        ):
+            offsets.add(start + begin + offset + len(value) - len(value.lstrip()) + 1)
     return offsets
+
+
+def _css_value(value: str) -> str:
+    """Read a CSS value with optional priority in linear time, without regex."""
+    stripped = value.strip()
+    if stripped.lower().endswith("!important"):
+        stripped = stripped[:-10].rstrip()
+    return stripped
 
 
 def _inspection(text: str, name: str) -> dict[str, Any]:

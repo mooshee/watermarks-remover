@@ -52,7 +52,7 @@ actually installed vendor base `321d93d`. The fork's upstream-tracking `main`
 remains unchanged; this release does not silently upgrade the vendor package.
 The shared installed skill-description wording is preserved.
 
-Validation on the configured Python 3.12 runtime: 111 focused cases pass; the
+Validation on the configured Python 3.12 runtime: 112 focused cases pass; the
 full suite has 1,224 passes, two optional skips and four pre-existing media
 failures. The same four failures reproduce on unchanged vendor base because the
 host ffmpeg cannot load `libx265.216.dylib`. No media pipeline or host library is
@@ -78,3 +78,8 @@ hosted French HTML. Their original SHA-256 values were preserved. The older
 installed client also passed against the new automatic source mode. A malformed
 CSS string before valid icon rules is handled using CSS newline recovery; glyphs
 inside malformed declarations remain unresolved.
+
+CodeQL's two review findings identified potentially expensive whitespace regex
+matching in font/content values. Those regexes were replaced with linear literal
+value parsing; an actual 400,000-space declaration regression passes. The
+reviewed metadata and byte-preservation behavior stays the same.

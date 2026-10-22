@@ -95,6 +95,24 @@ def test_glyph_inside_bad_css_string_is_still_unresolved():
     assert result["report"]["after"]["applicable_unicode"]["suspicious_total"] == 1
 
 
+def test_large_css_whitespace_uses_linear_literal_classification():
+    spaces = " " * 100_000
+    source = (
+        "<style>.menu{content:"
+        + spaces
+        + '"\uf0c9"'
+        + spaces
+        + "!important;font-family:"
+        + spaces
+        + '"Font Awesome 5 Free"'
+        + spaces
+        + "!important}</style>"
+    )
+    result = server._clean_payload(source.encode(), "index.html", {})
+    assert result["status"] == "inspected_no_change"
+    assert base64.b64decode(result["cleaned"]) == source.encode()
+
+
 @pytest.mark.parametrize(
     "source",
     [
