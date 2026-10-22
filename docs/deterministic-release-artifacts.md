@@ -132,16 +132,24 @@ path exists.
 
 Supported embedded signatures must have bounded, non-overlapping SuperBlob
 CodeDirectories using recognized versions and hash algorithms. Code page hashes
-must match all pre-signature bytes. CMS, entitlements, requirements, special-slot
-external metadata, scatter/pre-encrypted/linkage data and unknown signature
-children are not supported and block inspection rather than being certified
-opaque. Unsigned executables may be structurally inspected, but no signature is
-invented. Presence and page hashes do not establish signer trust or authenticity.
+must match all pre-signature bytes. Apple ad-hoc signatures may include an exact
+12-byte requirements vector with count zero and an exact 8-byte empty CMS wrapper.
+The requirements digest must match negative CodeDirectory slot 2 in every
+directory; slot 1 must be zero because external Info.plist metadata is unsupported.
+These empty children require ad-hoc CodeDirectories. Nonempty CMS/requirements,
+entitlements, other special-slot external metadata, scatter/pre-encrypted/linkage
+data and unknown signature children remain unsupported and block inspection.
+Unsigned executables may be structurally inspected, but no signature is invented.
+Presence and page hashes do not establish signer trust or authenticity.
 
 Limits: 256 MiB per artifact, 32 architectures, 4,096 load commands and sections
 per slice, 16 MiB of load commands per slice, 32 MiB of signature data per slice,
-64 signature children, 262,144 code hash slots and 4,096 bytes per functional
-metadata string. Unsupported structures fail closed. The no-change receipt
+32 KiB of all-zero allocation padding outside each declared SuperBlob, 64
+signature children, 262,144 code hash slots and 4,096 bytes per functional metadata
+string. The independent padding limit covers the 18,012-byte and 18,005-byte
+allocations observed in locally verified Apple ad-hoc signatures without allowing
+unbounded or nonzero tails. The receipt records the padding size and verified
+empty children/special slots. Unsupported structures fail closed. The no-change receipt
 includes identical SHA-256 hashes, `changed: false`, `actions: []` and explicit
 scope limits. `release_ready` only means no unresolved finding within this
 supported structural/metadata scope; it does not assert semantic code analysis,

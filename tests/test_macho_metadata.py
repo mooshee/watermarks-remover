@@ -641,6 +641,107 @@ def signed_with_metadata_blob(signature):
     return bytes(data)
 
 
+def ad_hoc_signature(*, padding=0, requirements=None, wrapper=None):
+    """Apple ad-hoc layout: hashed empty requirements and an empty CMS wrapper."""
+    requirements = struct.pack(">III", 0xFADE0C01, 12, 0) if requirements is None else requirements
+    wrapper = struct.pack(">II", 0xFADE0B01, 8) if wrapper is None else wrapper
+    directory = bytearray(thin(signed=True)[532:])
+    struct.pack_into(">I", directory, 4, 192)
+    struct.pack_into(">I", directory, 16, 160)
+    struct.pack_into(">I", directory, 24, 2)
+    directory[96:96] = hashlib.sha256(requirements).digest() + bytes(32)
+    length = 36 + len(directory) + len(requirements) + len(wrapper)
+    signature = struct.pack(
+        ">9I",
+        0xFADE0CC0,
+        length,
+        3,
+        0,
+        36,
+        2,
+        36 + len(directory),
+        0x10000,
+        36 + len(directory) + len(requirements),
+    )
+    return signature + directory + requirements + wrapper + bytes(padding)
+
+
+@pytest.mark.parametrize("padding", [0, 4096, 4097, 18005, 18012, 32768])
+@pytest.mark.parametrize("with_empty_metadata", [False, True])
+def test_zero_signature_allocation_padding_preserves_exact_bytes(padding, with_empty_metadata):
+    signature = (
+        ad_hoc_signature(padding=padding)
+        if with_empty_metadata
+        else thin(signed=True)[512:] + bytes(padding)
+    )
+    data = signed_with_metadata_blob(signature)
+    result = macho.clean_macho(data, {})
+    assert result["status"] == "inspected_no_change"
+    assert base64.b64decode(result["cleaned"]) == data
+    parsed = result["report"]["before"]["slices"][0]["signature"]
+    assert parsed["outer_padding_bytes"] == padding
+    assert parsed["empty_requirements_verified"] is with_empty_metadata
+    assert parsed["empty_cms_wrapper_verified"] is with_empty_metadata
+    assert parsed["directories"][0]["code_pages_verified"] is True
+    assert parsed["directories"][0]["special_slots_verified"] == (2 if with_empty_metadata else 0)
+    assert parsed["cryptographic_trust_verified"] is False
+
+
+@pytest.mark.parametrize("padding", [1, 4096, 18012, 32768])
+@pytest.mark.parametrize("position", [0, -1])
+def test_nonzero_signature_allocation_padding_is_blocked(padding, position):
+    signature = bytearray(ad_hoc_signature(padding=padding))
+    signature[len(signature) - padding + (position if position >= 0 else padding + position)] = 1
+    with pytest.raises(ValueError, match="nonzero or excessive signature padding"):
+        macho.inspect_macho(signed_with_metadata_blob(signature))
+
+
+def test_excessive_zero_signature_allocation_padding_is_blocked():
+    signature = ad_hoc_signature(padding=32769)
+    with pytest.raises(ValueError, match="nonzero or excessive signature padding"):
+        macho.inspect_macho(signed_with_metadata_blob(signature))
+
+
+@pytest.mark.parametrize(
+    "requirements,wrapper",
+    [
+        (struct.pack(">III", 0xFADE0C01, 12, 1), None),
+        (struct.pack(">III", 0xFADE0C01, 12, 0) + bytes(4), None),
+        (struct.pack(">III", 0xFADE0C01, 16, 0) + bytes(4), None),
+        (struct.pack(">III", 0xFADE0C00, 12, 0), None),
+        (None, struct.pack(">II", 0xFADE0B01, 12) + bytes(4)),
+        (None, struct.pack(">II", 0xFADE0B01, 8) + b"CMS"),
+        (None, struct.pack(">II", 0xFADE0B02, 8)),
+    ],
+)
+def test_nonempty_or_malformed_signature_metadata_is_blocked(requirements, wrapper):
+    signature = ad_hoc_signature(requirements=requirements, wrapper=wrapper)
+    with pytest.raises(ValueError):
+        macho.inspect_macho(signed_with_metadata_blob(signature))
+
+
+@pytest.mark.parametrize(
+    "offset,fmt,value,reason",
+    [
+        (36 + 12, "I", 0, "ad-hoc"),
+        (36 + 24, "I", 0, "special"),
+        (36 + 24, "I", 1, "special"),
+        (36 + 24, "I", 3, "special"),
+        (36 + 96, "B", 0, "special.*hash"),
+        (36 + 128, "B", 1, "external.*metadata"),
+        (20, "I", 0x10001, "unsupported signature child"),
+        (28, "I", 5, "unsupported signature child"),
+        (24, "I", 36, "overlapping signature children|requirements"),
+        (16, "I", 1, "signature index"),
+    ],
+)
+def test_empty_signature_metadata_requires_valid_binding(offset, fmt, value, reason):
+    data = signed_with_metadata_blob(ad_hoc_signature())
+    data = replace(data, 512 + offset, fmt, value, endian=">")
+    with pytest.raises(ValueError, match=reason):
+        macho.inspect_macho(data)
+
+
 def test_superblob_unindexed_gap_is_blocked():
     original = thin(signed=True)[512:]
     signature = bytearray(original[:20] + b"META" + original[20:])
@@ -688,6 +789,19 @@ def test_explicit_operator_artifact_read_only_acceptance():
     assert result["report"]["release_ready"] is True
     assert result["report"]["input_sha256"] == result["report"]["output_sha256"] == expected
     assert result["report"]["changed"] is False
+    cleaned = server._clean_payload(data, path.name, {"deterministic_only": True})
+    assert cleaned["status"] == "inspected_no_change"
+    assert base64.b64decode(cleaned["cleaned"]) == data
+    expected_padding = os.environ.get("MACHO_ACCEPTANCE_SIGNATURE_PADDING")
+    if expected_padding is not None:
+        signature = result["report"]["slices"][0]["signature"]
+        assert signature["outer_padding_bytes"] == int(expected_padding)
+        assert signature["empty_requirements_verified"] is True
+        assert signature["empty_cms_wrapper_verified"] is True
+        for directory in signature["directories"]:
+            assert directory["code_pages_verified"] is True
+            assert directory["special_slots_verified"] == 2
+            assert directory["ad_hoc"] is True
     after = path.stat()
     assert (before.st_size, before.st_mtime_ns, before.st_ino) == (
         after.st_size,

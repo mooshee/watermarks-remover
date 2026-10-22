@@ -19,6 +19,9 @@ MAX_COMMAND_BYTES = 16 << 20
 MAX_ARCHITECTURES = 32
 MAX_SECTIONS = 4096
 MAX_SIGNATURE_BYTES = 32 << 20
+# Apple codesign may leave about 18 KiB of zero allocation after the SuperBlob.
+# Bound that allocation independently of the existing total-signature limit.
+MAX_SIGNATURE_PADDING = 32 << 10
 THIN = {
     b"\xfe\xed\xfa\xce": (">", False),
     b"\xce\xfa\xed\xfe": ("<", False),
@@ -182,7 +185,9 @@ def _string(data: memoryview, start: int, end: int) -> int:
     return start + nul + 1
 
 
-def _code_directory(blob: memoryview, image: memoryview, signature_offset: int) -> dict[str, Any]:
+def _code_directory(
+    blob: memoryview, image: memoryview, signature_offset: int, requirements: memoryview | None
+) -> dict[str, Any]:
     fields = _unpack(blob, ">", "9I4BI", 0)
     (
         _,
@@ -215,7 +220,10 @@ def _code_directory(blob: memoryview, image: memoryview, signature_offset: int) 
     _require(
         special <= 64 and slots <= 262144 and page_exp <= 30, "CodeDirectory work bound exceeded"
     )
-    _require(special == 0, "external/special CodeDirectory metadata is unsupported")
+    _require(
+        special == (2 if requirements is not None else 0),
+        "external/special CodeDirectory metadata is unsupported",
+    )
     _require(fields[-1] == 0, "nonzero CodeDirectory reserved field")
     hashes = {1: (20, "sha1"), 2: (32, "sha256"), 3: (20, "sha256"), 4: (48, "sha384")}
     _require(
@@ -223,6 +231,18 @@ def _code_directory(blob: memoryview, image: memoryview, signature_offset: int) 
     )
     _require(hash_offset >= minimum + special * hash_size, "special hash slots underflow metadata")
     _range(hash_offset, slots * hash_size, length, "code hash slots outside CodeDirectory")
+    if requirements is not None:
+        # Negative slot 1 is external Info.plist metadata, absent for this supported
+        # standalone layout. Slot 2 binds the exact parsed empty requirements vector.
+        _require(
+            not any(blob[hash_offset - hash_size : hash_offset]),
+            "external CodeDirectory metadata is unsupported",
+        )
+        expected = hashlib.new(hashes[hash_type][1], requirements).digest()[:hash_size]
+        _require(
+            bytes(blob[hash_offset - 2 * hash_size : hash_offset - hash_size]) == expected,
+            "CodeDirectory special-slot hash differs",
+        )
     metadata_end = hash_offset - special * hash_size
     _require(minimum <= identifier < metadata_end, "identifier outside CodeDirectory metadata")
     occupied = [
@@ -274,6 +294,7 @@ def _code_directory(blob: memoryview, image: memoryview, signature_offset: int) 
         "ad_hoc": bool(flags & 2),
         "hash_algorithm": hashes[hash_type][1],
         "special_slots_bounds_checked": special,
+        "special_slots_verified": special,
     }
 
 
@@ -287,11 +308,13 @@ def _signature(image: memoryview, offset: int, size: int) -> dict[str, Any]:
         "invalid signature SuperBlob",
     )
     _require(
-        size - length <= 4096 and not any(blob[length:]), "nonzero or excessive signature padding"
+        size - length <= MAX_SIGNATURE_PADDING and not any(blob[length:]),
+        "nonzero or excessive signature padding",
     )
     table_end = 12 + count * 8
     _require(table_end <= length, "truncated signature indices")
-    ranges, types, directories = [], set(), []
+    ranges, types, directory_blobs = [], set(), []
+    requirements, empty_cms = None, False
     for index in range(count):
         kind, start = _unpack(blob, ">", "II", 12 + 8 * index)
         _require(kind not in types and table_end <= start <= length - 8, "invalid signature index")
@@ -300,15 +323,44 @@ def _signature(image: memoryview, offset: int, size: int) -> dict[str, Any]:
         _require(child_size >= 8, "short signature child")
         _range(start, child_size, length, "signature child outside SuperBlob")
         ranges.append((start, start + child_size))
-        # CMS, entitlements, requirements and launch constraints need their own parser.
-        # Never certify an opaque child solely because it carries an Apple magic.
-        _require(kind == 0 or 0x1000 <= kind < 0x1005, "unsupported signature child metadata")
-        _require(child_magic == 0xFADE0C02, "signature slot is not a CodeDirectory")
-        directories.append(_code_directory(blob[start : start + child_size], image, offset))
+        child = blob[start : start + child_size]
+        if kind == 0 or 0x1000 <= kind < 0x1005:
+            _require(child_magic == 0xFADE0C02, "signature slot is not a CodeDirectory")
+            directory_blobs.append(child)
+        elif kind == 2:
+            _require(
+                child_magic == 0xFADE0C01
+                and child_size == 12
+                and _unpack(child, ">", "I", 8)[0] == 0,
+                "only exact empty signature requirements are supported",
+            )
+            requirements = child
+        elif kind == 0x10000:
+            _require(
+                child_magic == 0xFADE0B01 and child_size == 8,
+                "only an exact empty CMS wrapper is supported",
+            )
+            empty_cms = True
+        else:
+            # Entitlements, meaningful CMS/requirements and launch constraints
+            # remain unsupported; no opaque child is certified by magic alone.
+            _require(False, "unsupported signature child metadata")
     _disjoint(ranges, "overlapping signature children")
     _zero_gaps(blob[:length], [(0, table_end), *ranges], "unparsed signature metadata padding")
     _require(0 in types, "signature lacks primary CodeDirectory")
-    return {"present": True, "directories": directories, "cryptographic_trust_verified": False}
+    directories = [_code_directory(child, image, offset, requirements) for child in directory_blobs]
+    _require(
+        (requirements is None and not empty_cms) or all(item["ad_hoc"] for item in directories),
+        "empty signature metadata requires ad-hoc CodeDirectories",
+    )
+    return {
+        "present": True,
+        "directories": directories,
+        "outer_padding_bytes": size - length,
+        "empty_requirements_verified": requirements is not None,
+        "empty_cms_wrapper_verified": empty_cms,
+        "cryptographic_trust_verified": False,
+    }
 
 
 def _thin(image: memoryview) -> dict[str, Any]:
@@ -661,6 +713,7 @@ def inspect_macho(data: bytes) -> dict[str, Any]:
             "architectures": MAX_ARCHITECTURES,
             "sections_per_slice": MAX_SECTIONS,
             "signature_bytes_per_slice": MAX_SIGNATURE_BYTES,
+            "signature_padding_bytes_per_slice": MAX_SIGNATURE_PADDING,
         },
         "limitations": "Bounded executable/load-command/segment/link-edit/code-signature structure inspection; CodeDirectory page hashes verified when present. Not signature trust, malware analysis, semantic inspection of code/data, external resources, or universal watermark/authorship proof. Unknown load commands or provenance-like section metadata require review. No bytes are changed.",
     }
