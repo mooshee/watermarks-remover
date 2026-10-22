@@ -234,6 +234,10 @@ def _inspection(text: str, name: str) -> dict[str, Any]:
 
 
 def clean_release_artifact(data: bytes, name: str, options: dict[str, Any]) -> dict[str, Any]:
+    from macho_metadata import clean_macho, is_macho
+
+    if is_macho(data):
+        return clean_macho(data, options)
     suffix = Path(name).suffix.lower()
     if suffix not in TEXT_EXTS | RELEASE_CONTAINER_EXTS:
         raise ValueError(

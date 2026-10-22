@@ -36,6 +36,51 @@ formats, invalid UTF-8 and inspection errors are errors, not clean results.
 Unsupported packages need a supported format-specific inspector; do not rename
 a binary or assert blanket package coverage.
 
+## Mach-O executable inspection
+
+Thin 32/64-bit and universal (fat32/fat64) Mach-O executable bytes now select a
+separate bounded inspector before any filename/text routing. `/inspect`, `/clean`
+and their batch forms report `kind: executable`.
+`cleaning_modes.mach_o_executable_inspection` advertises this support. Existing
+native clients can use `--inspect` without pretending a binary is text. Executable
+`/clean` is always deterministic and returns the exact input bytes; it never
+formats, rewrites, executes, disassembles, re-signs or edits the program.
+
+The inspector checks executable headers, known CPU/header width, fat slice tables,
+alignment and non-overlap, load-command extents and singleton families, segments,
+sections, symbol/link-edit ranges and bounded functional load strings. A dylib
+path is functional metadata, not prose: it is validated in its load-command
+context and preserved, even when its text resembles an AI label. Ordinary code,
+constants and string data are not decoded or passed to text detectors. Unknown
+commands, unrecognized segment/section metadata and embedded plist/LLVM metadata
+remain `requires_review`, not confirmed AI provenance. Uncovered file ranges,
+link-edit data and internal signature gaps must be zero padding; nonzero unknown
+bytes and malformed structures are errors. No magic-only or unknown-format clean
+path exists.
+
+Supported embedded signatures must have bounded, non-overlapping SuperBlob
+CodeDirectories using recognized versions and hash algorithms. Code page hashes
+must match all pre-signature bytes. CMS, entitlements, requirements, special-slot
+external metadata, scatter/pre-encrypted/linkage data and unknown signature
+children are not supported and block inspection rather than being certified
+opaque. Unsigned executables may be structurally inspected, but no signature is
+invented. Presence and page hashes do not establish signer trust or authenticity.
+
+Limits: 256 MiB per artifact, 32 architectures, 4,096 load commands and sections
+per slice, 16 MiB of load commands per slice, 32 MiB of signature data per slice,
+64 signature children, 262,144 code hash slots and 4,096 bytes per functional
+metadata string. Unsupported structures fail closed. The no-change receipt
+includes identical SHA-256 hashes, `changed: false`, `actions: []` and explicit
+scope limits. `release_ready` only means no unresolved finding within this
+supported structural/metadata scope; it does not assert semantic code analysis,
+malware safety, signature trust, external-resource inspection, universal watermark
+absence or authorship. Normal tests, review and deployment authorization remain
+required. Prose and media handling are unchanged.
+
+Format definitions are checked against Apple's primary `mach-o/loader.h`,
+`mach-o/fat.h`, `mach/machine.h` and `kern/cs_blobs.h` headers, including the local
+Xcode SDK and [Apple's published source](https://github.com/apple-oss-distributions/xnu/blob/main/EXTERNAL_HEADERS/mach-o/loader.h).
+
 The Rust client in Hallman Platform exposes `--deterministic-only` and
 `--metadata-only` (`also_layer_a_text=false`). It confirms the mode and hashes
 before writes. The existing prose and media branches keep their established

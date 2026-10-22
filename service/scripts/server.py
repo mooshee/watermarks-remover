@@ -67,6 +67,7 @@ from common import (
 from container_meta import DEEP_IMAGE_MODES, clean_container, inspect_container
 from format_dispatch import classify_bytes
 from image_meta import clean_image, inspect_image, run_synthid_score, synthid_is_watermarked
+from macho_metadata import inspect_macho, is_macho
 from release_artifacts import automatic_release_mode, clean_release_artifact
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
@@ -184,7 +185,7 @@ def _tool_usable(cmd: str) -> bool:
 def capabilities() -> dict[str, Any]:
     return {
         "version": VERSION,
-        "cleaning_modes": {"deterministic_only": True},
+        "cleaning_modes": {"deterministic_only": True, "mach_o_executable_inspection": True},
         "tools": {
             "c2patool": _tool_usable("c2patool"),
             "exiftool": _tool_usable("exiftool"),
@@ -367,6 +368,13 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                     properties={
                         "ok": _schema(type="boolean"),
                         "version": _schema(type="string"),
+                        "cleaning_modes": _schema(
+                            type="object",
+                            properties={
+                                "deterministic_only": _schema(type="boolean"),
+                                "mach_o_executable_inspection": _schema(type="boolean"),
+                            },
+                        ),
                         "tools": _schema(
                             type="object",
                             properties={
@@ -438,7 +446,9 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                     type="object",
                     properties={
                         "ok": _schema(type="boolean"),
-                        "kind": _schema(type="string", enum=["text", "image", "container", "av"]),
+                        "kind": _schema(
+                            type="string", enum=["text", "image", "container", "av", "executable"]
+                        ),
                         "suspicious": _suspicious_schema(),
                         "report": _schema(type="object"),
                     },
@@ -458,7 +468,9 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                     type="object",
                     properties={
                         "ok": _schema(type="boolean"),
-                        "kind": _schema(type="string", enum=["text", "image", "container", "av"]),
+                        "kind": _schema(
+                            type="string", enum=["text", "image", "container", "av", "executable"]
+                        ),
                         "cleaned": _schema(
                             type="string", description="Base64-encoded cleaned file bytes"
                         ),
@@ -521,7 +533,14 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                                     "ok": _schema(type="boolean"),
                                     "kind": _schema(
                                         type="string",
-                                        enum=["text", "image", "container", "av", "unknown"],
+                                        enum=[
+                                            "text",
+                                            "image",
+                                            "container",
+                                            "av",
+                                            "unknown",
+                                            "executable",
+                                        ],
                                     ),
                                     "suspicious": _suspicious_schema(),
                                     "report": _schema(type="object"),
@@ -608,7 +627,8 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                                     "name": _schema(type="string"),
                                     "ok": _schema(type="boolean"),
                                     "kind": _schema(
-                                        type="string", enum=["text", "image", "container", "av"]
+                                        type="string",
+                                        enum=["text", "image", "container", "av", "executable"],
                                     ),
                                     "cleaned": _schema(type="string"),
                                     "report": _schema(type="object"),
@@ -948,6 +968,19 @@ def _suspicious_report(report: dict[str, Any]) -> dict[str, Any]:
 
 def _inspect_payload(data: bytes, name: str, run_detect: bool) -> dict[str, Any]:
     """Inspect a file and return findings plus a structured suspicious report."""
+    if is_macho(data):
+        if run_detect:
+            raise ValueError("watermark detectors do not support executable bytes")
+        report = inspect_macho(data)
+        suspicious = _suspicious_report(report)
+        suspicious["verdict"] = bool(report["findings"])
+        suspicious["classes"]["executable_metadata"] = {
+            "present": bool(report["findings"]),
+            "strength": "bounded_structural_inspection",
+            "signals": {"findings": report["findings"]},
+            "description": "Unresolved executable metadata requires review; not an authorship judgment.",
+        }
+        return {"ok": True, "kind": "executable", "report": report, "suspicious": suspicious}
     kind = classify_bytes(data, Path(name).suffix)
     if kind == "unknown":
         return {
@@ -980,6 +1013,8 @@ def _inspect_payload(data: bytes, name: str, run_detect: bool) -> dict[str, Any]
 
 
 def _detect_payload(data: bytes, name: str) -> dict[str, Any]:
+    if is_macho(data):
+        raise ValueError("watermark detectors do not support executable bytes")
     kind = classify_bytes(data, Path(name).suffix)
     with tempfile.TemporaryDirectory(prefix="wm-detect-") as tmp:
         path = _tmp_path(Path(tmp), name or "input")
@@ -1028,7 +1063,7 @@ def _detect_payload(data: bytes, name: str) -> dict[str, Any]:
 
 
 def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str, Any]:
-    if options.get("deterministic_only") or automatic_release_mode(name):
+    if is_macho(data) or options.get("deterministic_only") or automatic_release_mode(name):
         return clean_release_artifact(data, name, options)
     kind = classify_bytes(data, Path(name).suffix)
     if kind == "unknown":
