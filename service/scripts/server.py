@@ -69,10 +69,16 @@ from elf_metadata import inspect_elf, is_elf
 from format_dispatch import classify_bytes
 from image_meta import clean_image, inspect_image, run_synthid_score, synthid_is_watermarked
 from macho_metadata import inspect_macho, is_macho
-from release_artifacts import automatic_release_mode, clean_release_artifact
+from release_artifacts import (
+    automatic_release_mode,
+    clean_release_artifact,
+    inspect_known_release_text,
+    known_release_text,
+)
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
 from text_unicode import clean_text, inspect_text
+from wasm_metadata import inspect_wasm, is_wasm
 
 VERSION = os.environ.get("WATERMARKS_SERVER_VERSION", "dev")
 
@@ -190,6 +196,8 @@ def capabilities() -> dict[str, Any]:
             "deterministic_only": True,
             "mach_o_executable_inspection": True,
             "elf64_amd64_executable_inspection": True,
+            "known_release_text_inspection": True,
+            "wasm_core_v1_metadata_inspection": True,
         },
         "tools": {
             "c2patool": _tool_usable("c2patool"),
@@ -379,6 +387,8 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                                 "deterministic_only": _schema(type="boolean"),
                                 "mach_o_executable_inspection": _schema(type="boolean"),
                                 "elf64_amd64_executable_inspection": _schema(type="boolean"),
+                                "known_release_text_inspection": _schema(type="boolean"),
+                                "wasm_core_v1_metadata_inspection": _schema(type="boolean"),
                             },
                         ),
                         "tools": _schema(
@@ -479,7 +489,7 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                         ),
                         "cleaned": _schema(
                             type="string",
-                            description="Base64-encoded cleaned file bytes; omitted for executable requires_review results",
+                            description="Base64-encoded cleaned file bytes; omitted for executable or known release-text requires_review results",
                         ),
                         "status": _schema(
                             type="string",
@@ -639,7 +649,7 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                                     ),
                                     "cleaned": _schema(
                                         type="string",
-                                        description="Base64 bytes; omitted for executable requires_review results",
+                                        description="Base64 bytes; omitted for executable or known release-text requires_review results",
                                     ),
                                     "status": _schema(
                                         type="string",
@@ -982,10 +992,16 @@ def _suspicious_report(report: dict[str, Any]) -> dict[str, Any]:
 
 def _inspect_payload(data: bytes, name: str, run_detect: bool) -> dict[str, Any]:
     """Inspect a file and return findings plus a structured suspicious report."""
-    if is_macho(data) or is_elf(data):
+    if is_macho(data) or is_elf(data) or is_wasm(data):
         if run_detect:
             raise ValueError("watermark detectors do not support executable bytes")
-        report = inspect_elf(data) if is_elf(data) else inspect_macho(data)
+        report = (
+            inspect_wasm(data)
+            if is_wasm(data)
+            else inspect_elf(data)
+            if is_elf(data)
+            else inspect_macho(data)
+        )
         suspicious = _suspicious_report(report)
         suspicious["verdict"] = bool(report["findings"])
         suspicious["classes"]["executable_metadata"] = {
@@ -995,6 +1011,24 @@ def _inspect_payload(data: bytes, name: str, run_detect: bool) -> dict[str, Any]
             "description": "Unresolved executable metadata requires review; not an authorship judgment.",
         }
         return {"ok": True, "kind": "executable", "report": report, "suspicious": suspicious}
+    if known_release_text(name):
+        if run_detect:
+            raise ValueError("watermark detectors do not support release text artifacts")
+        report = inspect_known_release_text(data, name)
+        suspicious = _suspicious_report(report)
+        suspicious["verdict"] = report["review_required"]
+        suspicious["classes"]["release_metadata"] = {
+            "present": bool(report["metadata_findings"]),
+            "strength": "bounded_format_inspection",
+            "signals": {"findings": report["metadata_findings"]},
+            "description": "Parsed release-file metadata requires review; not an authorship judgment.",
+        }
+        return {
+            "ok": True,
+            "kind": "text",
+            "report": report,
+            "suspicious": suspicious,
+        }
     kind = classify_bytes(data, Path(name).suffix)
     if kind == "unknown":
         return {
@@ -1027,8 +1061,10 @@ def _inspect_payload(data: bytes, name: str, run_detect: bool) -> dict[str, Any]
 
 
 def _detect_payload(data: bytes, name: str) -> dict[str, Any]:
-    if is_macho(data) or is_elf(data):
+    if is_macho(data) or is_elf(data) or is_wasm(data):
         raise ValueError("watermark detectors do not support executable bytes")
+    if known_release_text(name):
+        raise ValueError("watermark detectors do not support release text artifacts")
     kind = classify_bytes(data, Path(name).suffix)
     with tempfile.TemporaryDirectory(prefix="wm-detect-") as tmp:
         path = _tmp_path(Path(tmp), name or "input")
@@ -1080,6 +1116,7 @@ def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str,
     if (
         is_macho(data)
         or is_elf(data)
+        or is_wasm(data)
         or options.get("deterministic_only")
         or automatic_release_mode(name)
     ):
