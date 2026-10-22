@@ -46,3 +46,14 @@ The service retains the existing Python runtime because the vendor's format
 parsers and optional media/ML tools use it. This local adaptation is not a Rust
 rewrite. The native Rust client and supervisor remain separate from that parser
 runtime.
+
+The operational fork release branch is `vendor/v0.7.0-local`, pinned to the
+actually installed vendor base `321d93d`. The fork's upstream-tracking `main`
+remains unchanged; this release does not silently upgrade the vendor package.
+The shared installed skill-description wording is preserved.
+
+Validation on the configured Python 3.12 runtime: 109 focused cases pass; the
+full suite has 1,221 passes, two optional skips and four pre-existing media
+failures. The same four failures reproduce on unchanged vendor base because the
+host ffmpeg cannot load `libx265.216.dylib`. No media pipeline or host library is
+changed by this release. All 100 Python files pass Ruff lint and format checks.
