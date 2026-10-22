@@ -87,6 +87,11 @@ def test_font_glyph_only_html_is_unchanged():
         '<script>const css = `.x{content:"\uf0c9";font-family:"Font Awesome 5 Free"}`;</script>',
         '<style>.x{content:"\uf0c9";font-family:"Unverified Font"}</style>',
         '<style>.x{content:"\uf0c9";font-family:"Font Awesome 5 Free"}</style>\uf0c9',
+        '<style>/* .x{content:"\uf0c9";font-family:"Font Awesome 5 Free"} */</style>',
+        '<style>.x{content:"\uf0c9";font-family:"Font Awesome 5 Free";font-family:"Unverified"}</style>',
+        '<style>.x{content:"\uf0c9";font-family:"Unverified";font-family:"Font Awesome 5 Free"}</style>',
+        '<style>.x{content:"\uf0c9";font-family:"Font Awesome 5 Free";font:12px Unverified}</style>',
+        '<style>.x{content:"\uf0c9";content:"other";font-family:"Font Awesome 5 Free"}</style>',
     ],
 )
 def test_private_use_outside_verified_css_context_requires_review(source):

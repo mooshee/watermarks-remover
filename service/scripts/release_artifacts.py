@@ -23,12 +23,11 @@ from text_unicode import inspect_text
 
 RELEASE_TEXT_EXTS = TEXT_EXTS - {".txt", ".text", ".rst", ".adoc", ".asciidoc", ".org", ".tex"}
 RELEASE_CONTAINER_EXTS = {".html", ".htm", ".md", ".markdown", ".mdx"}
-_CSS_BLOCK = re.compile(r"[^{}]*\{([^{}]*)\}")
 _FONT_AWESOME = re.compile(
-    r"font-family\s*:\s*(['\"])(?:Font Awesome [456] (?:Free|Pro|Brands)|FontAwesome)\1\s*(?:;|$)",
+    r"\s*(['\"])(?:Font Awesome [456] (?:Free|Pro|Brands)|FontAwesome)\1\s*(?:!important\s*)?",
     re.I,
 )
-_ICON_CONTENT = re.compile(r"(?:^|;)\s*content\s*:\s*(['\"])([\uf078\uf0c9])\1\s*(?:;|$)", re.I)
+_ICON_CONTENT = re.compile(r"\s*(['\"])([\uf078\uf0c9])\1\s*(?:!important\s*)?", re.I)
 
 
 def automatic_release_mode(name: str) -> bool:
@@ -82,14 +81,95 @@ class _HTMLSpans(HTMLParser):
             self.css.append((self.source_offset(), data))
 
 
+def _css_blocks(css: str) -> tuple[str, list[tuple[int, int]]]:
+    """Mask comments and locate balanced blocks outside strings, keeping offsets.
+
+    Ambiguous or malformed CSS gets no functional classification. This is a
+    conservative classifier, not a CSS parser or a source-transforming tool.
+    """
+    masked = list(css)
+    blocks: list[tuple[int, int]] = []
+    stack: list[int] = []
+    quote = ""
+    i = 0
+    while i < len(css):
+        ch = css[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif css.startswith("/*", i):
+            end = css.find("*/", i + 2)
+            if end == -1:
+                return css, []
+            masked[i : end + 2] = " " * (end + 2 - i)
+            i = end + 2
+            continue
+        elif ch == "{":
+            stack.append(i + 1)
+        elif ch == "}":
+            if not stack:
+                return css, []
+            blocks.append((stack.pop(), i))
+        i += 1
+    return (css, []) if quote or stack else ("".join(masked), blocks)
+
+
+def _css_declarations(body: str) -> list[tuple[str, str, int]]:
+    declarations: list[tuple[str, str, int]] = []
+    quote = ""
+    start = 0
+    i = 0
+    while i <= len(body):
+        ch = body[i] if i < len(body) else ";"
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == ";":
+            declaration = body[start:i]
+            if declaration.strip():
+                key, colon, value = declaration.partition(":")
+                if not colon or not re.fullmatch(r"\s*[a-zA-Z-]+\s*", key):
+                    return []
+                declarations.append((key.strip().lower(), value, start + len(key) + 1))
+            start = i + 1
+        i += 1
+    return declarations
+
+
 def _functional_glyph_offsets(css: str, start: int) -> set[int]:
     offsets: set[int] = set()
-    for block in _CSS_BLOCK.finditer(css):
-        declarations = block.group(1)
-        if not _FONT_AWESOME.search(declarations):
+    masked, blocks = _css_blocks(css)
+    for begin, end in blocks:
+        body = masked[begin:end]
+        # Nested blocks and CSS escapes have more grammar than this classifier
+        # supports; leave their glyphs unresolved rather than guess.
+        if "{" in body or "}" in body or "\\" in body:
             continue
-        for match in _ICON_CONTENT.finditer(declarations):
-            offsets.add(start + block.start(1) + match.start(2))
+        declarations = _css_declarations(body)
+        fonts = [(value, offset) for key, value, offset in declarations if key == "font-family"]
+        content = [(value, offset) for key, value, offset in declarations if key == "content"]
+        if (
+            len(fonts) != 1
+            or len(content) != 1
+            or any(key in {"font", "all"} for key, _, _ in declarations)
+        ):
+            continue
+        if not _FONT_AWESOME.fullmatch(fonts[0][0]):
+            continue
+        value, offset = content[0]
+        match = _ICON_CONTENT.fullmatch(value)
+        if match:
+            offsets.add(start + begin + offset + match.start(2))
     return offsets
 
 
