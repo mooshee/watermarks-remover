@@ -204,6 +204,63 @@ def test_contextual_producer_generator_names_and_version_metadata_require_review
     assert wasm.clean_wasm(safe, {})["status"] == "inspected_no_change"
 
 
+@pytest.mark.parametrize(
+    "generator",
+    [
+        "OpenAI, Inc.",
+        "ChatGPT+API",
+        "+OpenAI",
+        "openai!",
+        "[cHaTgPt]",
+        "{ANTHROPIC}",
+        "=claude;",
+        "#gemini?",
+        "_OpenAI_",
+        "OpenAI_API",
+        "sdk_OpenAI",
+        "OpenAI\\tool",
+    ],
+)
+def test_punctuation_cannot_hide_provenance_in_producer_names_or_versions(generator):
+    for data in (module(producers(producer=generator)), module(producers(version=generator))):
+        result = server._clean_payload(data, "program.wasm", {})
+        assert result["status"] == "requires_review" and "cleaned" not in result
+        assert result["report"]["release_ready"] is False
+        inspected = server._inspect_payload(data, "program.wasm", False)
+        assert inspected["suspicious"]["verdict"] is True
+        assert "explicit_provenance_producer_metadata" in inspected["report"]["findings"]
+
+
+@pytest.mark.parametrize(
+    "producer",
+    [
+        "rustc",
+        "wasm-bindgen",
+        "clang",
+        "NotOpenAI",
+        "OpenAIMath",
+        "OpenAI2",
+        "2OpenAI",
+        "πOpenAI",
+        "OpenAIπ",
+    ],
+)
+def test_vendor_substrings_in_ordinary_producer_tokens_are_preserved(producer):
+    data = module(producers(producer=producer, version="1.2.3+toolchain"))
+    result = wasm.clean_wasm(data, {})
+    assert result["status"] == "inspected_no_change"
+    assert base64.b64decode(result["cleaned"]) == data
+
+
+def test_punctuated_vendor_functional_names_remain_opaque_and_unchanged():
+    symbol = "OpenAI, Inc./ChatGPT+API"
+    data = module(custom("name", section(1, b"\x01\0" + name(symbol))), producers())
+    result = wasm.clean_wasm(data, {})
+    assert result["status"] == "inspected_no_change"
+    assert base64.b64decode(result["cleaned"]) == data
+    assert symbol not in str(result["report"])
+
+
 def test_explicit_work_bounds(monkeypatch):
     monkeypatch.setattr(wasm, "MAX_SECTIONS", 2)
     with pytest.raises(ValueError, match="section count"):
@@ -291,6 +348,8 @@ def test_actual_native_client_http_nochange_and_review_refuses_output_backup(tmp
         for content in (
             module(custom("c2pa", b"manifest")),
             module(custom("unknown", b"metadata")),
+            module(producers(producer="OpenAI, Inc.")),
+            module(producers(version="ChatGPT+API")),
             module()[:-1],
         ):
             source.write_bytes(content)

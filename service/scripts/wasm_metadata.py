@@ -64,7 +64,8 @@ PROVENANCE_TEXT = re.compile(
     re.I,
 )
 PRODUCER_GENERATOR = re.compile(
-    r"(?:^|[\s._/()@:-])(?:openai|chatgpt|anthropic|claude|gemini)(?:$|[\s._/()@:-])",
+    # Unicode letters/digits bound tokens; punctuation (including _) cannot hide a vendor.
+    r"(?<![^\W_])(?:openai|chatgpt|anthropic|claude|gemini)(?![^\W_])",
     re.I,
 )
 
